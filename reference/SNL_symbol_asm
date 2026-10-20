@@ -1,0 +1,49 @@
+; SNL constants used by the serial-only driver. QDOS directory CDB layout.
+; Values retained from the supplied MDI_symbol_asm; no image/sector definitions.
+
+ch_drivr  equ    $04         ;address of driver
+fs.nmlen  equ     36         ;max length of file name
+fs_next     equ    $18       ;link to next file system channel
+fs_acces    equ    $1C       ;access mode
+fs_filnr    equ    $1E       ;file number
+fs_nblok    equ    $20       ;block containing next byte
+fs_eblok    equ    $24       ;end of file (block)
+fs_cblok    equ    $28       ;pointer to table for current slave block
+fs_updt     equ    $2C       ;set if file is updated
+fs_fname    equ    $32       ;length prefixed file name
+fs_spare    equ    $58       ;72 bytes spare          
+fs_drivn   equ     $14       ;drive number
+fs_files   equ     $22       ;ds.b   1       number of files open
+io.open   equ     $01        ;open channel
+io.close  equ     $02        ;close channel
+io.old    equ     $00        ;open old (exclusive) file or device
+io.share  equ     $01        ;open shared (old) file
+io.overw  equ     $03        ;open overwrite (or open new) file
+io.dir    equ     $04        ;open directory for reading
+io.pend   equ     $00        ;check for pending input
+io.fbyte  equ     $01        ;fetch a byte
+io.fline  equ     $02        ;fetch a line of bytes
+io.fstrg  equ     $03        ;fetch a string of bytes
+io.sbyte  equ     $05        ;send a byte
+io.sstrg  equ     $07        ;send a string of bytes
+fs.check  equ     $40        ;check all pending operations
+fs.flush  equ     $41        ;flush buffers
+fs.posab  equ     $42        ;position file pointer (absolute)
+fs.posre  equ     $43        ;position file pointer (relative)
+fs.mdinf  equ     $45        ;medium name and free/total sectors
+fs.heads  equ     $46        ;set file header
+fs.headr  equ     $47        ;read file header
+fs.load   equ     $48        ;load file
+fs.save   equ     $49        ;save file
+err.nc  equ      -1          ;not complete
+err.or  equ      -4          ;out of range
+err.bo  equ      -5          ;buffer full
+err.iu  equ      -9          ;in use
+err.ef  equ      -10         ;end of file
+err.bn  equ      -12         ;bad name
+err.te  equ      -13         ;Xmit error
+err.bp  equ      -15         ;bad parameter
+err.ov  equ      -18         ;overflow
+err.ni  equ      -19         ;not implemented yet
+err.ro  equ      -20         ;read only
+sv_fslst  equ     $140       ;pointer to list of file channel definitions

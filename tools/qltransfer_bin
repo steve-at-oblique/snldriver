@@ -1,0 +1,53 @@
+"""Send a binary with the stock QDOS serial LBYTES header (not SNL protocol)."""
+import argparse
+from pathlib import Path
+import struct
+import time
+
+
+def serial_file(data):
+    if not 1 <= len(data) <= 0x7FFFFFFF:
+        raise ValueError("Binary length must be 1..2147483647 bytes")
+    # QDOS FS.HEADR on SER expects FF followed by the first 14 header bytes.
+    # LBYTES uses the first long as the exact payload count. Type/data space
+    # are zero: this transfers bytes; the user installs the driver with CALL.
+    return b"\xff" + struct.pack(">I", len(data)) + bytes(10) + data
+
+
+def transfer_timeout(byte_count, baud):
+    # 8N2 = start + eight data + two stop bits. Allow CTS/receiver pauses
+    # as well as the full wire time; ten seconds cannot send a 16K toolkit.
+    return max(30.0, 2 * byte_count * 11 / baud + 10)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("file", type=Path)
+    parser.add_argument("--port", default="/dev/ttyUSB0")
+    parser.add_argument("--baud", type=int, default=9600)
+    args = parser.parse_args()
+    if args.baud <= 0:
+        parser.error("baud must be positive")
+    data = args.file.read_bytes()
+    packet = serial_file(data)
+    timeout = transfer_timeout(len(packet), args.baud)
+    print(f"Sending {len(data)} bytes plus the 15-byte QDOS serial header.")
+    print("The QL must be waiting in LBYTES SER2H,base; stop the SNL daemon first.")
+    print(f"Serial: {args.baud} baud, 8N2, RTS/CTS enabled; write timeout {timeout:.0f}s")
+    import serial
+    with serial.Serial(args.port, baudrate=args.baud, bytesize=8,
+                       parity="N", stopbits=2, rtscts=True, xonxoff=False,
+                       write_timeout=timeout) as port:
+        remaining = memoryview(packet)
+        while remaining:
+            sent = port.write(remaining)
+            if not sent:
+                raise OSError("Serial write made no progress")
+            remaining = remaining[sent:]
+        port.flush()
+        time.sleep(0.5)  # allow the USB adapter to finish before closing
+    print("Sent. Wait for the QL's BASIC cursor before CALLing the binary.")
+
+
+if __name__ == "__main__":
+    main()

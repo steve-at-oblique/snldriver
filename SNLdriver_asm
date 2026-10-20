@@ -1,0 +1,1343 @@
+; ============================================================================
+; SNL serial filesystem driver
+; ============================================================================
+;
+; Version       : 2.15
+; Wire protocol : SNL v2, with readiness handshake and directory support
+; Target        : Sinclair QL / Motorola 68000 instruction set
+; Assembler     : Talent/Quanta Assembler 2.02
+;
+; This is the self-contained assembly source. Constants are included below;
+; no INCLUDE file or SYM output is needed when assembling through SNL.
+;
+; Assembly conventions:
+;   - Keep labels within eight characters.
+;   - Talent treats dots and underscores as equivalent in symbol names.
+;   - Put an instruction or directive on every label line.
+;   - Message lengths exclude alignment padding; update counts if text changes.
+;
+; See docs/SERIAL_OPEN.md for protocol details, supported calls and test history.
+; Original source attribution and redistribution notices are retained below.
+; ============================================================================
+
+; ----------------------------------------------------------------------------
+; QDOS channel definition block (CDB) offsets
+; ----------------------------------------------------------------------------
+
+ch_drivr equ      $04                       ; address of driver
+fs.nmlen equ      36                        ; max length of file name
+fs_next  equ      $18                       ; link to next file system channel
+fs_acces equ      $1C                       ; access mode
+fs_filnr equ      $1E                       ; file number
+fs_nblok equ      $20                       ; block containing next byte
+fs_eblok equ      $24                       ; end of file (block)
+fs_cblok equ      $28                       ; pointer to table for current slave block
+fs_updt  equ      $2C                       ; set if file is updated
+fs_fname equ      $32                       ; length prefixed file name
+fs_spare equ      $58                       ; 72 bytes spare
+
+; ----------------------------------------------------------------------------
+; QDOS physical definition block (PDB) offsets
+; ----------------------------------------------------------------------------
+
+fs_drivn equ      $14                       ; drive number
+fs_files equ      $22                       ; ds.b   1       number of files open
+
+; ----------------------------------------------------------------------------
+; QDOS channel operations and access modes
+; ----------------------------------------------------------------------------
+
+io.open  equ      $01                       ; open channel
+io.close equ      $02                       ; close channel
+io.old   equ      $00                       ; open old (exclusive) file or device
+io.share equ      $01                       ; open shared (old) file
+io.overw equ      $03                       ; open overwrite (or open new) file
+io.dir   equ      $04                       ; open directory for reading
+
+; ----------------------------------------------------------------------------
+; QDOS byte and string I/O calls
+; ----------------------------------------------------------------------------
+
+io.pend  equ      $00                       ; check for pending input
+io.fbyte equ      $01                       ; fetch a byte
+io.fline equ      $02                       ; fetch a line of bytes
+io.fstrg equ      $03                       ; fetch a string of bytes
+io.sbyte equ      $05                       ; send a byte
+io.sstrg equ      $07                       ; send a string of bytes
+
+; ----------------------------------------------------------------------------
+; QDOS filesystem I/O calls
+; ----------------------------------------------------------------------------
+
+fs.check equ      $40                       ; check all pending operations
+fs.flush equ      $41                       ; flush buffers
+fs.posab equ      $42                       ; position file pointer (absolute)
+fs.posre equ      $43                       ; position file pointer (relative)
+fs.mdinf equ      $45                       ; medium name and free/total sectors
+fs.heads equ      $46                       ; set file header
+fs.headr equ      $47                       ; read file header
+fs.load  equ      $48                       ; load file
+fs.save  equ      $49                       ; save file
+
+; ----------------------------------------------------------------------------
+; QDOS error codes
+; ----------------------------------------------------------------------------
+
+err.nc   equ      -1                        ; not complete
+err.or   equ      -4                        ; out of range
+err.bo   equ      -5                        ; buffer full
+err.iu   equ      -9                        ; in use
+err.ef   equ      -10                       ; end of file
+err.bn   equ      -12                       ; bad name
+err.te   equ      -13                       ; Xmit error
+err.bp   equ      -15                       ; bad parameter
+err.ov   equ      -18                       ; overflow
+err.ni   equ      -19                       ; not implemented yet
+err.ro   equ      -20                       ; read only
+
+; ----------------------------------------------------------------------------
+; QDOS system variables
+; ----------------------------------------------------------------------------
+
+sv_fslst equ      $140                      ; pointer to list of file channel definitions
+
+; SYM output disabled: single open-file SNL build
+
+; ----------------------------------------------------------------------------
+; Entry point and installation banner
+; ----------------------------------------------------------------------------
+
+         bsr      init
+         tst.l    d0
+         bne      boot_err
+         movem.l  d0-d3/a0-a3,-(a7)
+         suba.l   a0,a0                     ; default console, as in original banner
+         lea      banner,a1
+         move.w   $D0,a2                    ; UT.MTEXT / UT.WTEXT
+         jsr      (a2)
+         movem.l  (a7)+,d0-d3/a0-a3
+         tst.l    d0                        ; retain installation result
+         rts
+boot_err bsr      dbg_boot
+         tst.l    d0
+         rts
+
+banner   dc.w     37                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL Device driver V2.15 serial debug',10
+ban_end  equ      *
+         dc.b     0                         ; word alignment
+
+; ----------------------------------------------------------------------------
+; SNL per-channel state
+; ----------------------------------------------------------------------------
+
+; Per-channel state in the 72-byte spare area. No maps or slave blocks.
+
+snl_chid equ      fs_spare                  ; long: SER2H channel ID
+snl_pdb  equ      fs_spare+4                ; long: physical definition block
+snl_dead equ      fs_spare+8                ; byte: failed/partial serial exchange
+snl_mode equ      fs_spare+9                ; byte: requested mode (shared stays read only)
+snl_rx   equ      fs_spare+10               ; word: successfully received reply bytes
+snl_last equ      fs_spare+12               ; word: last underlying serial driver status
+snl_phas equ      fs_spare+14               ; byte: current transfer stage
+snl_cnt  equ      fs_spare+16               ; word: last READ/WRITE reply count
+snl_call equ      fs_spare+18               ; byte: original file I/O operation
+snl_serp equ      fs_spare+20               ; long: permanent serial CDB pointer
+snl_txp  equ      fs_spare+24               ; long: validated ROM serial transmit task
+snl_buf  equ      fs_spare+28               ; long: read-ahead buffer at linkage+$500
+snl_base equ      fs_spare+32               ; long: payload offset of cached first byte
+snl_len  equ      fs_spare+36               ; word: valid cached bytes, 0..512
+snl_err  equ      fs_spare+38               ; word: deferred result at end of cache
+snl_time equ      3                         ; per-byte RTC deadline in seconds
+
+; fs_nblok and fs_eblok are FLAT payload position/length, no header offset.
+
+; ----------------------------------------------------------------------------
+; Driver installation
+; ----------------------------------------------------------------------------
+
+; Allocate only the linkage block, clear it, then register SNL.
+
+init     movem.l  d1-d3/a0-a4,-(a7)
+         moveq    #$18,d0                   ; MT.ALCHP
+         move.l   #$700,d1                  ; linkage, private stack, 512-byte read buffer
+         moveq    #0,d2                     ; owned by job zero
+         moveq    #0,d3
+         trap     #1
+         tst.l    d0
+         bne      ini_ret
+         move.l   a0,a1
+         moveq    #23,d1
+ini_clr  clr.l    (a1)+
+         dbra     d1,ini_clr
+         lea      dd_mdvio,a1
+         move.l   a1,$1C(a0)
+         lea      dd_mdvop,a1
+         move.l   a1,$20(a0)
+         lea      dd_mdvcl,a1
+         move.l   a1,$24(a0)
+         lea      snl_ni,a1
+         move.l   a1,$34(a0)                ; FORMAT not supported
+         move.l   #$28,$38(a0)              ; PDB: common fields only
+         move.w   #3,$3C(a0)
+         move.l   #'SNL0',$3E(a0)
+         move.w   #3,$42(a0)
+         move.l   #'SNL0',$44(a0)
+
+; QDOS does not reserve the outer OPEN's channel-table slot until the
+; directory driver returns. A nested IO.OPEN there can select the SAME slot.
+; Open the serial channel now, owned by job zero, before registering SNL.
+
+         move.l   a0,a4
+         lea      snl_ser,a0
+         moveq    #0,d1                     ; serial channel belongs to job zero
+         moveq    #0,d3
+         moveq    #io.open,d0
+         trap     #2
+         tst.l    d0
+         bne      ini_free
+         move.l   a0,$4C(a4)                ; permanent transport channel ID
+
+; Resolve its CDB once while the serial ID is valid. It is owned by job
+; zero and remains allocated. File operations call its driver directly.
+
+         moveq    #0,d0                     ; MT.INF returns system variables in A0
+         trap     #1
+         move.l   $4C(a4),d0
+         andi.l   #$FFFF,d0                 ; channel-table index (tag is upper word)
+         lsl.l    #2,d0
+         move.l   $78(a0),a1                ; SV.CHBAS
+         adda.l   d0,a1
+         move.l   (a1),$50(a4)              ; permanent serial CDB
+
+; Locate the original QDOS serial scheduler task. Its guarded entry is:
+; MOVE SR,-(A7) / ORI.W #$0700,SR / SF D4. It services queued output,
+; which otherwise cannot start while this directory driver blocks scheduling.
+; Only accept the exact eight-byte entry signature inside the base ROM.
+
+         move.l   $40(a0),a1                ; SV.SHLST
+         moveq    #31,d3                    ; bounded traversal, at most 32 nodes
+ini_scan move.l   a1,d0
+         beq      ini_rom
+         move.l   4(a1),a2
+         move.l   a2,d0
+         beq      ini_next
+         btst     #0,d0
+         bne      ini_next
+         cmpi.l   #$BFF8,d0
+         bhi      ini_next
+         cmpi.l   #$40E7007C,(a2)
+         bne      ini_next
+         cmpi.l   #$070051C4,4(a2)
+         bne      ini_next
+         move.l   a2,$54(a4)
+         bra      ini_link
+ini_next move.l   (a1),a1
+         dbra     d3,ini_scan
+ini_rom  moveq    #err.ni,d0
+         bsr      dbg_rom
+         bra      ini_drop
+ini_link moveq    #$13,d0                   ; installation epoch for readiness tokens
+         trap     #1
+         move.l   d1,$58(a4)
+         lea      $18(a4),a0
+         moveq    #$22,d0                   ; MT.LDD
+         trap     #1
+         tst.l    d0
+         beq      ini_ret
+ini_drop move.l   d0,-(a7)
+         move.l   $4C(a4),a0
+         moveq    #io.close,d0
+         trap     #2                        ; cleanup transport if registration failed
+         move.l   (a7)+,d0
+ini_free move.l   d0,-(a7)
+         move.l   a4,a0
+         moveq    #$19,d0                   ; MT.RECHP on installation failure
+         trap     #1
+         move.l   (a7)+,d0
+ini_ret  movem.l  (a7)+,d1-d3/a0-a4
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; Directory driver OPEN and DELETE entry
+; ----------------------------------------------------------------------------
+
+; OPEN: A0=CDB, A1=PDB, A3=linkage, A6=sysvars. Preserve D4+,
+; A0/A1/A3/A6. QDOS supplies fs_fname and fs_acces in the CDB.
+; 11 drive mode length name -> status, then size.l for successful OPEN.
+; Mode $FF is DELETE: status only, no installed channel or file count.
+
+dd_mdvop move.l   a2,-(a7)
+         lea      $4FC(a3),a2               ; OPEN supplies assumed linkage base
+         move.l   a7,(a2)
+         move.l   a2,a7
+         bra      op_main
+op_main  movem.l  d4-d7/a0-a1/a3-a6,-(a7)
+         move.l   a0,a5
+         move.l   a1,snl_pdb(a5)
+         move.b   fs_acces(a5),snl_mode(a5)
+         move.l   #-1,snl_chid(a5)
+         clr.b    snl_dead(a5)
+         clr.w    snl_rx(a5)
+         clr.w    snl_last(a5)
+         clr.l    snl_base(a5)
+         clr.w    snl_len(a5)
+         clr.w    snl_err(a5)
+         lea      $500(a3),a2
+         move.l   a2,snl_buf(a5)
+         tst.b    $48(a3)                   ; shared serial protocol has no handles
+         bne      op_iu
+         cmpi.b   #-1,fs_acces(a5)          ; QDOS DELETE enters through directory OPEN
+         beq      op_valid
+         cmpi.b   #io.dir,fs_acces(a5)
+         bhi      op_ni
+op_valid moveq    #0,d6
+         move.w   fs_fname(a5),d6
+         bne      op_nlen
+         cmpi.b   #io.dir,snl_mode(a5)
+         bne      op_bn
+op_nlen  cmpi.w   #fs.nmlen,d6
+         bhi      op_bn
+         moveq    #0,d5
+         move.b   fs_drivn(a1),d5
+         move.l   $4C(a3),snl_chid(a5)      ; reuse installation-time transport
+         move.l   $50(a3),snl_serp(a5)
+         move.l   $54(a3),snl_txp(a5)
+         bsr      snl_rdy
+         bne      op_err
+         moveq    #$11,d1
+         bsr      snl_send
+         bne      op_err
+         move.l   d5,d1
+         bsr      snl_send
+         bne      op_err
+         moveq    #0,d1
+         move.b   fs_acces(a5),d1
+         bsr      snl_send
+         bne      op_err
+         move.l   d6,d1
+         bsr      snl_send
+         bne      op_err
+         tst.w    d6
+         beq      op_reply                  ; empty directory name: no filename bytes
+         lea      fs_fname+2(a5),a4
+op_name  move.b   (a4)+,d1
+         bsr      snl_send
+         bne      op_err
+         subq.w   #1,d6
+         bne      op_name
+op_reply bsr      snl_stat
+         bne      op_err
+         cmpi.b   #-1,snl_mode(a5)
+         beq      op_ret                    ; QDOS frees the temporary DELETE CDB
+         bsr      snl_getl
+         bne      op_err
+         tst.l    d1
+         bmi      op_bad
+         move.l   d1,fs_eblok(a5)
+         clr.l    fs_nblok(a5)
+         clr.l    fs_cblok(a5)
+         clr.b    fs_updt(a5)
+
+; QDOS increments FS_FILES itself. Present this as an exclusive CDB so
+; QDOS cannot clone a shared CDB (which would alias the serial ID and reset
+; its file position to the microdrive header offset $40). Enforce the
+; originally requested read-only mode separately through snl_mode.
+
+         move.b   #io.old,fs_acces(a5)
+         move.w   #1,fs_filnr(a5)
+         st       $48(a3)                   ; one active file in driver linkage
+         moveq    #0,d0
+         bra      op_ret
+op_bad   bsr      snl_bad
+
+; Expected host errors (Not Found, Exists, etc.) are normal application
+; probes. Print byte/serial diagnostics only for a broken exchange.
+
+op_err   tst.b    snl_dead(a5)
+         beq      op_ret
+         bsr      dbg_rhi
+         bsr      dbg_rx
+         bsr      dbg_ser
+         bra      op_ret
+op_iu    moveq    #err.iu,d0
+         bra      op_ret
+op_ni    bsr      dbg_open
+         moveq    #err.ni,d0
+         bra      op_ret
+op_bn    moveq    #err.bn,d0
+op_ret   movem.l  (a7)+,d4-d7/a0-a1/a3-a6
+         bra      snl_exit
+
+; ----------------------------------------------------------------------------
+; Directory driver I/O dispatch
+; ----------------------------------------------------------------------------
+
+; I/O: preserve all except D0/D1/A1. No ERR.NC escapes after packets
+; start: a transport failure poisons the CDB to prevent unsafe replay.
+
+dd_mdvio move.l   a2,-(a7)
+         move.l   ch_drivr(a0),a2           ; points at linkage+$18
+         lea      $4E4(a2),a2               ; private stack top minus saved-SP long
+         move.l   a7,(a2)
+         move.l   a2,a7
+         bra      io_main
+io_main  movem.l  d2-d7/a0/a2-a6,-(a7)
+         move.l   a0,a5
+         move.b   d0,snl_call(a5)
+         clr.b    snl_phas(a5)
+         clr.w    snl_cnt(a5)
+         clr.w    snl_rx(a5)
+         tst.b    snl_dead(a5)
+         bne      io_te
+         cmpi.b   #io.pend,d0
+         beq      chk_pend
+         cmpi.b   #io.fbyte,d0
+         beq      io_byte
+         cmpi.b   #io.sbyte,d0
+         beq      io_byte
+         moveq    #0,d5
+         move.w   d2,d5                     ; ordinary string count is a WORD
+         moveq    #0,d7                     ; read
+         cmpi.b   #io.fstrg,d0
+         beq      io_block
+         moveq    #2,d7                     ; read through LF
+         cmpi.b   #io.fline,d0
+         beq      io_block
+         moveq    #1,d7                     ; write
+         cmpi.b   #io.sstrg,d0
+         beq      io_block
+
+; BASIC's LIST/SAVE code probes screen calls such as $24 (clear right).
+; As in the original directory driver, reject unsupported non-file calls
+; with Bad Parameter, without issuing file-operation diagnostics.
+
+         cmpi.b   #fs.check,d0
+         bcs      io_bp
+         move.l   d2,d5                     ; LOAD/SAVE lengths are LONGs
+         moveq    #0,d7
+         cmpi.b   #fs.load,d0
+         beq      io_bulk
+         moveq    #1,d7
+         cmpi.b   #fs.save,d0
+         beq      io_bulk
+         cmpi.b   #fs.mdinf,d0
+         beq      io_info
+         cmpi.b   #fs.headr,d0
+         beq      io_headr
+         cmpi.b   #fs.heads,d0
+         beq      io_heads
+         cmpi.b   #fs.check,d0
+         beq      io_flush
+         cmpi.b   #fs.flush,d0
+         beq      io_flush
+         cmpi.b   #fs.posab,d0
+         beq      io_pos
+         cmpi.b   #fs.posre,d0
+         beq      io_rel
+         bsr      dbg_io
+         moveq    #err.ni,d0
+         bra      io_ret
+io_bulk  tst.l    d5
+         bmi      io_bp
+io_block bsr      snl_xfer
+         bra      io_ret
+io_byte  move.l   a1,-(a7)
+         move.l   d1,-(a7)
+         lea      3(a7),a1                  ; one-byte buffer in saved D1
+         moveq    #0,d7
+         cmpi.b   #io.sbyte,d0
+         bne      io_byt1
+         moveq    #1,d7
+io_byt1  moveq    #1,d5
+         bsr      snl_xfer
+         move.l   (a7)+,d1                  ; fetched byte replaces low byte only
+         move.l   (a7)+,a1
+         bra      io_ret
+chk_pend move.l   fs_nblok(a5),d0
+         cmp.l    fs_eblok(a5),d0
+         bcs      io_ok
+         moveq    #err.ef,d0
+         bra      io_ret
+io_rel   add.l    fs_nblok(a5),d1
+         bvc      io_pos
+         tst.l    d1
+         bmi      io_top                    ; positive signed overflow
+         moveq    #0,d1                     ; negative signed overflow
+io_pos   tst.l    d1
+         bmi      io_bof
+         cmp.l    fs_eblok(a5),d1
+         bhi      io_top
+         move.l   d1,fs_nblok(a5)
+         cmp.l    fs_eblok(a5),d1
+         beq      io_eof
+         bra      io_ok
+io_bof   clr.l    fs_nblok(a5)
+         moveq    #0,d1
+         bra      io_ok
+io_top   move.l   fs_eblok(a5),d1
+         move.l   d1,fs_nblok(a5)
+io_eof   moveq    #err.ef,d0
+         bra      io_ret
+io_flush moveq    #$17,d1
+         bsr      snl_send
+         bne      io_ret
+         bsr      snl_stat
+         bra      io_ret
+io_heads cmpi.b   #io.share,snl_mode(a5)
+         beq      io_ro
+         cmpi.b   #io.dir,snl_mode(a5)
+         beq      io_ro
+         moveq    #$16,d1
+         bsr      snl_send
+         bne      io_ret
+         move.l   a1,a4
+         moveq    #13,d6
+io_hsend move.b   (a4)+,d1
+         bsr      snl_send
+         bne      io_ret
+         dbra     d6,io_hsend
+         bsr      snl_stat
+         bne      io_ret
+         move.l   a4,a1
+         moveq    #14,d1
+         bra      io_ok
+
+; FS.MDINF: D1 high word free sectors, low word total sectors.
+; Copy exactly ten raw medium-name bytes and advance A1 by ten.
+
+io_info  moveq    #$18,d1
+         bsr      snl_send
+         bne      io_ret
+         bsr      snl_stat
+         bne      io_ret
+         bsr      snl_getl
+         bne      io_ret
+         move.l   d1,d5
+         suba.w   #10,a7
+         move.l   a1,a4
+         move.l   a7,a1
+         moveq    #10,d2
+         bsr      snl_bget
+         move.l   a4,a1
+         tst.l    d0
+         bne      io_ierr
+         move.l   a7,a2
+         moveq    #10,d6
+io_icopy move.b   (a2)+,(a1)+
+         subq.w   #1,d6
+         bne      io_icopy
+         adda.w   #10,a7
+         move.l   d5,d1
+         bra      io_ok
+io_ierr  adda.w   #10,a7
+         moveq    #0,d1
+         bra      io_ret
+io_headr moveq    #0,d5
+         move.w   d2,d5
+         cmpi.w   #14,d5
+         bcs      io_ov
+         cmpi.w   #64,d5
+         bls      io_hlen
+         moveq    #64,d5
+io_hlen  moveq    #$15,d1
+         bsr      snl_send
+         bne      io_ret
+         bsr      snl_stat
+         bne      io_ret
+         suba.w   #64,a7                    ; drain full header into private scratch
+         move.l   a1,a4
+         move.l   a7,a1
+         moveq    #64,d2
+         bsr      snl_bget
+         move.l   a4,a1
+         tst.l    d0
+         bne      io_herr
+         move.l   a7,a2
+         move.l   d5,d6
+io_hcopy move.b   (a2)+,(a1)+
+         subq.w   #1,d6
+         bne      io_hcopy
+         adda.w   #64,a7
+         move.l   d5,d1
+         bra      io_ok
+io_herr  adda.w   #64,a7
+         moveq    #0,d1                     ; partial header is never published
+         bra      io_ret
+io_ov    moveq    #err.ov,d0
+         bra      io_ret
+io_ro    moveq    #err.ro,d0
+         bra      io_ret
+io_bp    moveq    #err.bp,d0
+         bra      io_ret
+io_te    moveq    #err.te,d0
+         bra      io_ret
+io_ok    moveq    #0,d0
+io_ret   cmpi.l   #err.te,d0
+         beq      io_diag
+         cmpi.l   #-6,d0                    ; Channel Not Open
+         bne      io_rest
+io_diag  bsr      dbg_fail
+         bsr      dbg_call
+         bsr      dbg_phas
+         bsr      dbg_hi
+         bsr      dbg_cnt
+         bsr      dbg_rhi
+         bsr      dbg_rx
+         bsr      dbg_ser
+io_rest  movem.l  (a7)+,d2-d7/a0/a2-a6
+         bra      snl_exit
+
+; ----------------------------------------------------------------------------
+; File transfer and write blocks
+; ----------------------------------------------------------------------------
+
+; Transfer D5 bytes at A1. D7=0 read, 1 write, 2 line.
+; Reads use a 512-byte cache; writes remain acknowledged blocks.
+; Only bytes delivered to the caller advance its buffer/file position.
+
+snl_xfer moveq    #0,d4
+         cmpi.l   #1,d7
+         bne      snl_read
+         cmpi.b   #io.share,snl_mode(a5)
+         beq      x_ro
+         cmpi.b   #io.dir,snl_mode(a5)
+         beq      x_ro
+         move.l   fs_nblok(a5),d0
+         add.l    d5,d0
+         bvs      x_range
+         clr.w    snl_len(a5)               ; writes invalidate all cached payload bytes
+         clr.w    snl_err(a5)
+x_next   tst.l    d5
+         beq      x_full
+         move.l   d5,d6
+         cmpi.l   #512,d6
+         bls      x_count
+         move.l   #512,d6
+x_count  moveq    #$13,d1                   ; WRITE command
+x_req    move.b   #1,snl_phas(a5)
+         clr.w    snl_rx(a5)
+         bsr      snl_send
+         bne      x_ret
+         move.l   fs_nblok(a5),d1
+         bsr      snl_putl
+         bne      x_ret
+         move.l   d6,d1
+         bsr      snl_putw
+         bne      x_ret
+x_write  move.l   a1,a4
+         move.l   d6,d3
+x_wsend  move.b   (a4)+,d1
+         bsr      snl_send
+         bne      x_ret
+         subq.w   #1,d3
+         bne      x_wsend
+         bsr      snl_stat
+         tst.b    snl_dead(a5)
+         bne      x_te
+         move.l   d0,-(a7)
+         bsr      snl_getw
+         bne      x_pop
+         cmp.l    d6,d1
+         bhi      x_badp
+         adda.l   d1,a1
+         add.l    d1,d4
+         sub.l    d1,d5
+         add.l    d1,fs_nblok(a5)
+         move.l   fs_nblok(a5),d0
+         cmp.l    fs_eblok(a5),d0
+         bls      x_wsize
+         move.l   d0,fs_eblok(a5)
+x_wsize  move.l   (a7)+,d0
+         tst.l    d0
+         bne      x_ret
+         cmp.l    d6,d1
+         bne      x_bad
+         bra      x_next
+x_badp   bsr      snl_bad
+x_pop    addq.l   #4,a7
+         bra      x_ret
+x_bad    bsr      snl_bad
+         bra      x_ret
+x_te     moveq    #err.te,d0
+         bra      x_ret
+x_ro     moveq    #err.ro,d0
+         bra      x_ret
+x_range  moveq    #err.or,d0
+         bra      x_ret
+x_full   cmpi.l   #2,d7
+         bne      x_ok
+         moveq    #err.bo,d0                ; line buffer exhausted without LF
+         bra      x_ret
+x_ok     moveq    #0,d0
+x_ret    move.l   d4,d1
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; Read-ahead cache
+; ----------------------------------------------------------------------------
+
+; Read/line operations use one buffer shared by the single open SNL file.
+; Cache offsets are independent of the logical file position. Seeking within
+; the window reuses it; seeking outside refills at the requested position.
+; EOF/errors accompanying prefetched data are deferred until that data has
+; been delivered. No data from a partial transport packet is published.
+
+snl_read moveq    #0,d4
+r_next   tst.l    d5
+         beq      r_full
+         move.l   fs_nblok(a5),d2
+         sub.l    snl_base(a5),d2
+         bcs      r_fill
+         moveq    #0,d3
+         move.w   snl_len(a5),d3
+         cmp.l    d3,d2
+         bcs      r_have
+         bne      r_fill
+         move.w   snl_err(a5),d0            ; position exactly at cached end
+         ext.l    d0
+         bne      r_ret
+r_fill   bsr      snl_fill
+         bne      r_ret
+         bra      r_next
+r_have   move.l   snl_buf(a5),a4
+         adda.l   d2,a4
+         moveq    #0,d1
+         move.b   (a4),d1
+         move.b   d1,(a1)+
+         addq.l   #1,fs_nblok(a5)
+         addq.l   #1,d4
+         subq.l   #1,d5
+         cmpi.l   #2,d7
+         bne      r_next
+         cmpi.b   #10,d1
+         beq      r_ok                      ; LF included; following bytes stay cached
+         bra      r_next
+r_full   cmpi.l   #2,d7
+         bne      r_ok
+         moveq    #err.bo,d0                ; line buffer full with no LF
+         bra      r_ret
+r_ok     moveq    #0,d0
+r_ret    move.l   d4,d1
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; Read-ahead buffer refill
+; ----------------------------------------------------------------------------
+
+; Fetch a complete <=512-byte reply into private storage, preserving caller
+; A1/D4/D5/D7. Count/status and payload must ALL arrive before publishing
+; the cache. A zero-byte error is returned immediately; a short EOF block
+; supplies data now and reports EOF only when the caller reaches its end.
+
+snl_fill movem.l  d2-d7/a1-a4,-(a7)
+         clr.w    snl_len(a5)
+         clr.w    snl_err(a5)
+         move.l   fs_nblok(a5),d1
+         move.l   d1,snl_base(a5)
+         move.b   #1,snl_phas(a5)
+         clr.w    snl_rx(a5)
+         moveq    #$12,d1
+         bsr      snl_send
+         bne      cf_ret
+         move.l   snl_base(a5),d1
+         bsr      snl_putl
+         bne      cf_ret
+         move.l   #512,d1
+         bsr      snl_putw
+         bne      cf_ret
+         move.b   #2,snl_phas(a5)
+         bsr      snl_stat
+         move.l   d0,d4
+         tst.b    snl_dead(a5)
+         bne      cf_fail
+         move.b   #3,snl_phas(a5)
+         bsr      snl_getw
+         bne      cf_ret
+         move.w   d1,snl_cnt(a5)
+         move.l   d1,d5                     ; actual unsigned count from reply
+         move.b   #5,snl_phas(a5)
+         cmpi.l   #512,d5
+         bhi      cf_bad
+         tst.l    d4
+         bne      cf_data
+         cmpi.l   #512,d5                   ; success must satisfy the 512-byte request
+         bne      cf_bad
+cf_data  tst.l    d5
+         beq      cf_empty
+         move.l   snl_buf(a5),a1
+         move.l   d5,d2
+         move.b   #4,snl_phas(a5)
+         bsr      snl_bget
+         bne      cf_ret
+         move.w   d4,snl_err(a5)
+         move.w   d5,snl_len(a5)            ; publish only after the complete reply
+         moveq    #0,d0
+         bra      cf_ret
+cf_empty move.w   d4,snl_err(a5)
+cf_fail  move.l   d4,d0
+         bra      cf_ret
+cf_bad   bsr      snl_bad
+cf_ret   movem.l  (a7)+,d2-d7/a1-a4
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; Bulk serial receive
+; ----------------------------------------------------------------------------
+
+; Receive D2.W bytes at A1 using ROM IO.FSTRG. Called only after the
+; request has reached Linux and the reply status/count have been read:
+; no TX kick is needed while draining payload. The ROM may return a
+; partial batch with ERR.NC; retry only the remainder, D1 initially zero.
+; Return D0=status, D1=total received, A1 advanced by that count.
+; Preserve D2-D7/A0/A2-A6. Timeout is 3 seconds without progress, with
+; a finite retry bound even if the RTC stops. Never publish partial data.
+
+snl_bget movem.l  d2-d7/a0/a2-a6,-(a7)
+         moveq    #0,d4
+         move.w   d2,d4
+         moveq    #0,d5
+         tst.b    snl_dead(a5)
+         bne      bg_dead
+         tst.l    d4
+         beq      bg_ok
+         moveq    #$13,d0
+         trap     #1
+         move.l   d1,d6
+         move.l   #262143,d7
+bg_again movem.l  d4-d7/a2-a6,-(a7)
+         move.l   snl_serp(a5),a0
+         move.l   ch_drivr(a0),a4
+         lea      -$18(a4),a3
+         move.l   $04(a4),a4
+         moveq    #io.fstrg,d0
+         moveq    #0,d1                     ; fresh count for this ROM invocation
+         move.l   d4,d2
+         sub.l    d5,d2
+         moveq    #0,d3
+         moveq    #0,d7
+         jsr      (a4)
+         movem.l  (a7)+,d4-d7/a2-a6
+         move.w   d0,snl_last(a5)
+         move.l   d4,d2
+         sub.l    d5,d2
+         cmp.l    d2,d1
+         bhi      bg_dead                   ; ROM count must fit requested remainder
+         add.l    d1,d5
+         add.w    d1,snl_rx(a5)
+         tst.l    d0
+         beq      bg_count
+         cmpi.l   #err.nc,d0
+         bne      bg_fail
+bg_count cmp.l    d4,d5
+         beq      bg_ok
+         tst.l    d1
+         beq      bg_wait
+         moveq    #$13,d0                   ; reset idle deadline only after progress
+         trap     #1
+         move.l   d1,d6
+         move.l   #262143,d7
+         bra      bg_again
+bg_wait  subq.l   #1,d7
+         beq      bg_dead
+         moveq    #$13,d0
+         trap     #1
+         sub.l    d6,d1
+         cmpi.l   #snl_time,d1
+         bcs      bg_again
+bg_dead  moveq    #err.te,d0
+bg_fail  st       snl_dead(a5)
+         bra      bg_ret
+bg_ok    moveq    #0,d0
+bg_ret   move.l   d5,d1
+         movem.l  (a7)+,d2-d7/a0/a2-a6
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; Readiness handshake
+; ----------------------------------------------------------------------------
+
+; Readiness is a non-destructive ASCII probe before OPEN/DELETE only.
+; Request: ~SNL? + 16 A..P nibbles + LF. Reply changes ? to !.
+; Token = installation RTC epoch + persistent attempt counter. Delayed
+; replies from earlier attempts cannot match. No file request is sent until
+; the whole current reply matches; a timeout leaves the next OPEN retryable.
+; Linkage+$58 epoch / +$5C counter are outside stack and cache storage.
+
+snl_rdy  movem.l  d2-d7/a0-a4/a6,-(a7)
+         suba.w   #24,a7                    ; 22 wire bytes, even stack allocation
+         addq.l   #1,$5C(a3)
+         move.l   #$7E534E4C,(a7)           ; ~SNL
+         move.b   #$3F,4(a7)                ; ?
+         lea      5(a7),a1
+         move.l   $58(a3),d4
+         bsr      hs_hex
+         move.l   $5C(a3),d4
+         bsr      hs_hex
+         move.b   #10,(a1)
+         move.l   a7,a4
+         moveq    #21,d6
+hs_send  move.b   (a4)+,d1
+         bsr      snl_send
+         bne      hs_ret
+         dbra     d6,hs_send
+         move.b   #$21,4(a7)                ; expected reply uses !
+         move.l   a7,a4
+         moveq    #0,d5                     ; matched prefix length
+         moveq    #$13,d0
+         trap     #1
+         move.l   d1,d6
+         move.l   #262143,d7
+hs_poll  bsr      snl_kick                  ; finish queued probe bytes, including LF
+         bsr      snl_poll
+         tst.l    d0
+         beq      hs_byte
+         cmpi.l   #err.nc,d0
+         bne      hs_ret
+         bra      hs_wait
+hs_byte  cmp.b    (a4),d1
+         bne      hs_miss
+         addq.l   #1,a4
+         addq.w   #1,d5
+         cmpi.w   #22,d5
+         beq      hs_ok
+         bra      hs_wait
+hs_miss  move.l   a7,a4
+         moveq    #0,d5
+         cmpi.b   #$7E,d1                   ; overlapping start marker
+         bne      hs_wait
+         addq.l   #1,a4
+         moveq    #1,d5
+hs_wait  subq.l   #1,d7
+         beq      hs_dead
+         moveq    #$13,d0
+         trap     #1
+         sub.l    d6,d1
+         cmpi.l   #snl_time,d1
+         bcs      hs_poll
+hs_dead  moveq    #err.te,d0                ; no file request was sent: safe to retry
+         bra      hs_ret
+hs_ok    moveq    #0,d0
+hs_ret   adda.w   #24,a7
+         movem.l  (a7)+,d2-d7/a0-a4/a6
+         tst.l    d0
+         rts
+
+; Eight printable nibbles; alphabet avoids all binary command bytes.
+
+hs_hex   moveq    #7,d6
+hs_digit rol.l    #4,d4
+         move.l   d4,d1
+         andi.w   #15,d1
+         addi.b   #65,d1
+         move.b   d1,(a1)+
+         dbra     d6,hs_digit
+         rts
+
+; ----------------------------------------------------------------------------
+; Nonblocking serial receive
+; ----------------------------------------------------------------------------
+
+; One nonblocking receive attempt. Unlike snl_recv, ERR.NC does not poison
+; the temporary CDB or impose a fresh timeout for every stale input byte.
+
+snl_poll movem.l  d2-d7/a0-a6,-(a7)
+         move.l   snl_serp(a5),a0
+         move.l   ch_drivr(a0),a4
+         lea      -$18(a4),a3
+         move.l   $04(a4),a4
+         moveq    #io.fbyte,d0
+         moveq    #0,d1
+         moveq    #0,d2
+         moveq    #0,d3
+         moveq    #0,d7
+         jsr      (a4)
+         movem.l  (a7)+,d2-d7/a0-a6
+         move.w   d0,snl_last(a5)
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; Directory driver CLOSE entry
+; ----------------------------------------------------------------------------
+
+; CLOSE closes the host file and unlinks/frees only the SNL CDB.
+; SER2H remains open for the lifetime of the installed driver.
+
+dd_mdvcl move.l   a2,-(a7)
+         move.l   ch_drivr(a0),a2           ; points at linkage+$18
+         lea      $4E4(a2),a2               ; private stack top minus saved-SP long
+         move.l   a7,(a2)
+         move.l   a2,a7
+         bra      cl_main
+cl_main  movem.l  d4-d7/a3-a6,-(a7)
+         move.l   a0,a5
+         moveq    #err.te,d0
+         tst.b    snl_dead(a5)
+         bne      cl_done
+         moveq    #4,d1
+         bsr      snl_send
+         bne      cl_done
+         bsr      snl_stat
+cl_done  move.l   d0,d5
+         move.l   ch_drivr(a5),a2
+         clr.b    $30(a2)                   ; clear driver's one-file lock
+         move.l   snl_pdb(a5),a2
+         subq.b   #1,fs_files(a2)
+         lea      fs_next(a5),a0
+         lea      sv_fslst(a6),a1
+         move.w   $D4,a4                    ; UT.UNLNK / MEM.RLST
+         jsr      (a4)
+         move.l   a5,a0
+         move.w   $C2,a4                    ; MM.RECHP / MEM.RCHP
+         jsr      (a4)
+         move.l   d5,d0
+         movem.l  (a7)+,d4-d7/a3-a6
+         bra      snl_exit
+
+; ----------------------------------------------------------------------------
+; Restore the caller stack
+; ----------------------------------------------------------------------------
+
+; Nested serial traps need more than QDOS's documented 64-byte allowance.
+; Atomic calls use the driver's private stack. Restore caller stack/A2.
+
+snl_exit move.l   (a7),a7
+         move.l   (a7)+,a2
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; Diagnostic output
+; ----------------------------------------------------------------------------
+
+; Diagnostics are printed only for unsupported operations and installation
+; errors. UT.MTEXT with A0=0 is the documented supervisor-mode console case.
+; Preserve every caller register, including D0 (operation/error) and A1.
+
+dbg_io   movem.l  d0-d7/a0-a6,-(a7)
+         move.l   d0,d4
+         lea      dbg_itxt,a2
+         bra      dbg_msg
+dbg_open movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.b   fs_acces(a5),d4
+         lea      dbg_otxt,a2
+         bra      dbg_msg
+dbg_host movem.l  d0-d7/a0-a6,-(a7)
+         move.l   d0,d4
+         lea      dbg_htxt,a2
+         bra      dbg_msg
+dbg_rhi  movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.w   snl_rx(a5),d4
+         lsr.w    #8,d4
+         lea      dbg_vtxt,a2
+         bra      dbg_msg
+dbg_rx   movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.w   snl_rx(a5),d4
+         lea      dbg_rtxt,a2
+         bra      dbg_msg
+dbg_ser  movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.w   snl_last(a5),d4
+         lea      dbg_stxt,a2
+         bra      dbg_msg
+dbg_fail movem.l  d0-d7/a0-a6,-(a7)
+         move.l   d0,d4
+         lea      dbg_ftxt,a2
+         bra      dbg_msg
+dbg_call movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.b   snl_call(a5),d4
+         lea      dbg_ctxt,a2
+         bra      dbg_msg
+dbg_phas movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.b   snl_phas(a5),d4
+         lea      dbg_ptxt,a2
+         bra      dbg_msg
+dbg_hi   movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.w   snl_cnt(a5),d4
+         lsr.w    #8,d4
+         lea      dbg_ktxt,a2
+         bra      dbg_msg
+dbg_cnt  movem.l  d0-d7/a0-a6,-(a7)
+         moveq    #0,d4
+         move.w   snl_cnt(a5),d4
+         lea      dbg_ntxt,a2
+         bra      dbg_msg
+dbg_rom  movem.l  d0-d7/a0-a6,-(a7)
+         move.l   d0,d4
+         lea      dbg_ttxt,a2
+         bra      dbg_msg
+dbg_boot movem.l  d0-d7/a0-a6,-(a7)
+         move.l   d0,d4
+         lea      dbg_btxt,a2
+dbg_msg  suba.w   #40,a7
+         move.l   a7,a1
+         moveq    #0,d3
+         move.w   (a2),d3
+         addq.w   #1,d3                     ; copy length word and payload, DBRA count
+dbg_copy move.b   (a2)+,(a1)+
+         dbra     d3,dbg_copy
+         lea      dbg_hex,a0
+         move.l   d4,d1
+         lsr.b    #4,d1
+         andi.w   #15,d1
+         move.b   0(a0,d1.w),-3(a1)
+         move.l   d4,d1
+         andi.w   #15,d1
+         move.b   0(a0,d1.w),-2(a1)
+         move.l   a7,a1
+         suba.l   a0,a0
+         move.w   $D0,a2
+         jsr      (a2)
+         adda.w   #40,a7
+         movem.l  (a7)+,d0-d7/a0-a6
+         rts
+
+; ----------------------------------------------------------------------------
+; Diagnostic message text
+; ----------------------------------------------------------------------------
+
+dbg_itxt dc.w     24                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL unsupported I/O $00',10
+dbg_iend equ      *
+dbg_otxt dc.w     30                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL unsupported OPEN mode $00',10
+dbg_oend equ      *
+dbg_btxt dc.w     28                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL installation failed $00',10
+dbg_bend equ      *
+dbg_htxt dc.w     20                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL host status $00',10
+dbg_hend equ      *
+dbg_rtxt dc.w     24                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL reply bytes low $00',10
+dbg_rend equ      *
+dbg_stxt dc.w     22                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL serial result $00',10
+dbg_send equ      *
+dbg_ftxt dc.w     18                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL I/O error $00',10
+dbg_fend equ      *
+dbg_ctxt dc.w     17                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL I/O call $00',10
+dbg_cend equ      *
+         dc.b     0                         ; word alignment
+dbg_ptxt dc.w     23                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL transfer stage $00',10
+dbg_pend equ      *
+         dc.b     0                         ; word alignment
+dbg_ktxt dc.w     19                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL count high $00',10
+dbg_kend equ      *
+         dc.b     0                         ; word alignment
+dbg_ntxt dc.w     18                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL count low $00',10
+dbg_nend equ      *
+dbg_ttxt dc.w     32                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL ROM TX task unavailable $00',10
+dbg_tend equ      *
+dbg_vtxt dc.w     25                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL reply bytes high $00',10
+dbg_vend equ      *
+         dc.b     0                         ; word alignment
+dbg_hex  dc.b     '0123456789ABCDEF'
+
+; ----------------------------------------------------------------------------
+; Serial byte helpers
+; ----------------------------------------------------------------------------
+
+; All serial helpers preserve D2-D7/A0-A6. Return D0=status,
+; D1=received byte/word/long. Big endian, independent of buffer alignment.
+
+snl_send moveq    #io.sbyte,d0
+         bra      snl_trap
+snl_recv moveq    #io.fbyte,d0
+         bsr      snl_trap
+         bne      sr_ret
+         addq.w   #1,snl_rx(a5)
+sr_ret   tst.l    d0
+         rts
+snl_trap movem.l  d2-d7/a0-a3,-(a7)
+         tst.b    snl_dead(a5)
+         bne      st_dead
+         move.l   d0,d4                     ; byte operation to retry on ERR.NC
+         move.l   d1,d5                     ; original transmit byte
+         moveq    #$13,d0                   ; MT.RCLCK, whole seconds
+         trap     #1
+         move.l   d1,d6
+         move.l   #262143,d7                ; also bound retries if RTC is stopped
+
+; Call the serial driver's byte entry as QDOS would, without nesting the
+; TRAP #3 manager. The driver may destroy D4-D7/A3-A5; protect our polling
+; state and CDB pointer. D7=0 is the initial byte-operation end offset.
+
+st_again bsr      snl_kick                  ; drain/start queued output without scheduler
+         movem.l  d4-d7/a4-a6,-(a7)
+         move.l   snl_serp(a5),a0
+         move.l   ch_drivr(a0),a4           ; serial driver's access-layer link
+         lea      -$18(a4),a3               ; assumed driver definition base
+         move.l   $04(a4),a4                ; I/O entry from linkage
+         move.l   d4,d0                     ; IO.FBYTE or IO.SBYTE
+         move.l   d5,d1
+         moveq    #0,d2
+         moveq    #0,d3                     ; initial entry, not scheduler re-entry
+         moveq    #0,d7
+         jsr      (a4)
+         movem.l  (a7)+,d4-d7/a4-a6
+         move.w   d0,snl_last(a5)
+         tst.l    d0
+         beq      st_done
+         cmpi.l   #err.nc,d0
+         bne      st_fail
+         subq.l   #1,d7
+         beq      st_dead
+         moveq    #$13,d0
+         trap     #1
+         sub.l    d6,d1
+         cmpi.l   #snl_time,d1
+         bcs      st_again
+         bra      st_dead
+st_done  cmpi.l   #io.sbyte,d4
+         bne      st_ret
+         bsr      snl_kick                  ; start a newly queued byte immediately
+         bra      st_ret
+st_dead  moveq    #err.te,d0                ; never replay a partly sent packet
+st_fail  st       snl_dead(a5)
+st_ret   movem.l  (a7)+,d2-d7/a0-a3
+         tst.l    d0
+         rts
+
+; ----------------------------------------------------------------------------
+; ROM transmit-service wrapper
+; ----------------------------------------------------------------------------
+
+; Wrapper around the validated standard ROM serial scheduler callback.
+; This calls the ROM routine directly, not the general scheduler. It pushes its own SR and returns via RTE to the JSR return.
+; D3=1 advances the ROM's port-switch countdown when the selected port is
+; idle. It checks UART busy and CTS before sending, preserving hardware
+; arbitration. All registers used by the file/byte routines are protected.
+
+snl_kick movem.l  d0-d7/a0-a6,-(a7)
+         move.l   snl_txp(a5),a0
+         moveq    #1,d3
+         jsr      (a0)
+         movem.l  (a7)+,d0-d7/a0-a6
+         rts
+
+; ----------------------------------------------------------------------------
+; Protocol status and integer helpers
+; ----------------------------------------------------------------------------
+
+snl_stat bsr      snl_recv
+         bne      ss_ret
+         move.b   d1,d0
+         ext.w    d0
+         ext.l    d0
+         beq      ss_ret
+         cmpi.l   #err.nc,d0
+         bge      snl_bad
+         cmpi.l   #err.ro,d0
+         blt      snl_bad
+         cmpi.l   #err.ni,d0
+         bne      ss_ret
+         bsr      dbg_host                  ; distinguish host rejection from local I/O
+ss_ret   tst.l    d0
+         rts
+snl_bad  st       snl_dead(a5)
+         moveq    #err.te,d0
+         rts
+snl_putl movem.l  d2-d3,-(a7)
+         move.l   d1,d2
+         moveq    #3,d3
+         bra      sp_loop
+snl_putw movem.l  d2-d3,-(a7)
+         move.l   d1,d2
+         swap     d2
+         moveq    #1,d3
+sp_loop  rol.l    #8,d2
+         move.l   d2,d1
+         bsr      snl_send
+         bne      sp_ret
+         dbra     d3,sp_loop
+sp_ret   movem.l  (a7)+,d2-d3
+         tst.l    d0
+         rts
+snl_getl movem.l  d2-d3,-(a7)
+         moveq    #3,d3
+         bra      sg_start
+snl_getw movem.l  d2-d3,-(a7)
+         moveq    #1,d3
+sg_start moveq    #0,d2
+sg_loop  bsr      snl_recv
+         bne      sg_ret
+         lsl.l    #8,d2
+         move.b   d1,d2
+         dbra     d3,sg_loop
+         move.l   d2,d1
+sg_ret   movem.l  (a7)+,d2-d3
+         tst.l    d0
+         rts
+snl_ni   moveq    #err.ni,d0
+         rts
+snl_ser  dc.w     5
+         dc.b     'SER2H',0
+
+; Historical source attribution and redistribution notice:
+; **** The majority of the device driver comes from the source code of
+; Minerva V1.98 Copyright Qview/Laurence Reeves
+
+; **** Portions of driver contain code based on SMSQ/E V3.16
+
+; **** Copyright Notice for SMSQ/E
+
+; LICENCE FOR SMSQ/E
+; Copyright (c) 1989-2012, by
+
+;    Tony Tebby
+;    Marcel Kilgus
+;    Bruno Coativy
+;    Fabrizio Diversi
+;    Phoebus Dokos
+;    Thierry Godefroy
+;    Jérôme Grimbert
+;    George Gwilt
+;    John Hall
+;    Mark Swift
+;    Per Witte
+;    Wolfgang Lenerz
+
+; collectively called the "COPYRIGHT HOLDERS".
+
+; All rights reserved.
+
+; Redistribution and use in source and binary forms, with or without modification,
+; are permitted provided that the following conditions are met:
+
+;  *  Redistributions of source code must retain the above copyright notice,
+;     this list of conditions and the following disclaimer.
+;  *  Redistributions in binary form must reproduce the above copyright notice,
+;     this list of conditions and the following disclaimer in the documentation
+;     and/or other materials provided with the distribution.
+
+; THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
+; EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+; OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+; SHALL COPYRIGHT HOLDERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+; EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+; SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+; HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+; OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+         end

@@ -1,0 +1,65 @@
+100 REMark SNL V2.10 Base64 serial loader for snl2_bin
+101 CLS
+105 ALLOC=4096
+110 BINLEN=3080
+120 ENTRYOFF=0
+130 BAUD 9600
+140 if base = 0 then base=RESPR(ALLOC)
+150 PRINT "Loading ";BINLEN;" bytes at ";base
+160 OPEN #5,SER2HC
+170 pos=0
+175 nextmark = 512
+180 REPeat receive
+190   INPUT #5,line$
+200   IF LEN(line$)>0 THEN
+210     FOR i=1 TO LEN(line$) STEP 4
+220       c0$=line$(i TO i)
+230       c1$=line$(i+1 TO i+1)
+240       c2$=line$(i+2 TO i+2)
+250       c3$=line$(i+3 TO i+3)
+260       v0=B64VAL(c0$)
+270       v1=B64VAL(c1$)
+280       v2=B64VAL(c2$)
+290       v3=B64VAL(c3$)
+300       IF v0<0 OR v1<0 THEN
+310         PRINT "Bad Base64 at byte ";pos
+320         CLOSE #5
+330         STOP
+340       END IF
+350       byte=v0*4+v1 DIV 16
+360       POKE base+pos,byte
+370       pos=pos+1
+380       IF c2$<>"=" AND pos<BINLEN THEN
+390         byte=(v1 MOD 16)*16+v2 DIV 4
+400         POKE base+pos,byte
+410         pos=pos+1
+420       END IF
+430       IF c3$<>"=" AND pos<BINLEN THEN
+440         byte=(v2 MOD 4)*64+v3
+450         POKE base+pos,byte
+460         pos=pos+1
+470       END IF
+475       IF pos>nextmark THEN
+477          print pos
+478          nextmark = nextmark + 512
+479       end IF
+480       IF pos>=BINLEN THEN EXIT receive
+490     END FOR i
+500   END IF
+510 END REPeat receive
+520 CLOSE #5
+530 PRINT "Loaded ";pos;" bytes"
+540 PRINT "Calling ";base+ENTRYOFF
+550 CALL base+ENTRYOFF
+560 STOP
+1000 DEFine FuNction B64VAL(c$)
+1010   n=CODE(c$)
+1020   IF n>=65 AND n<=90 THEN RETurn n-65
+1030   IF n>=97 AND n<=122 THEN RETurn n-71
+1040   IF n>=48 AND n<=57 THEN RETurn n+4
+1050   IF c$="+" THEN RETurn 62
+1060   IF c$="/" THEN RETurn 63
+1070   IF c$="=" THEN RETurn -2
+1080   RETurn -1
+1090 END DEFine
+

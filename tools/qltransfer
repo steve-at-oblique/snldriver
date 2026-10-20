@@ -1,0 +1,19 @@
+import sys
+import time
+import serial
+
+with open(sys.argv[1],"rb") as f:
+	data = f.read()
+
+with serial.Serial(
+	"/dev/ttyUSB0",
+	baudrate = 9600,
+	bytesize = serial.EIGHTBITS,
+	parity = serial.PARITY_NONE,
+	stopbits=serial.STOPBITS_TWO,
+	rtscts=True
+) as s:
+	s.write(data)
+	s.write(b"\x1a")
+	s.flush()
+	time.sleep(0.5)

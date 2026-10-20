@@ -1,0 +1,10 @@
+10 REMark Binary receive control test, without the SNL driver installed
+20 BAUD 9600
+30 OPEN #3,ser2h
+40 PRINT #3,CHR$(126);
+50 FOR i=1 TO 5
+60   a$=INKEY$(#3,150)
+70   IF LEN(a$)=0 THEN PRINT i;": TIMEOUT"
+80   IF LEN(a$)>0 THEN PRINT i;": ";CODE(a$)
+90 END FOR i
+100 CLOSE #3

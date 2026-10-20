@@ -1,0 +1,26 @@
+10 REMark SNL binary round trip: use a fresh filename for each run
+20 n=1537
+30 f$="snl1_bintest_bin"
+40 p=RESPR(n+32)
+50 IF p=0 THEN STOP
+60 b=p+16
+70 FOR i=0 TO n+31: POKE p+i,165
+80 FOR i=0 TO n-1: POKE b+i,i-256*INT(i/256)
+90 PRINT "Saving ";n;" bytes to ";f$
+100 SBYTES f$,b,n
+110 FOR i=0 TO n-1: POKE b+i,90
+120 PRINT "Loading back"
+130 LBYTES f$,b
+140 bad=0
+150 FOR i=0 TO n-1
+160   want=i-256*INT(i/256)
+170   IF PEEK(b+i)<>want THEN bad=bad+1
+180 END FOR i
+190 guard=0
+200 FOR i=0 TO 15
+210   IF PEEK(p+i)<>165 THEN guard=guard+1
+220   IF PEEK(b+n+i)<>165 THEN guard=guard+1
+230 END FOR i
+240 PRINT "Byte mismatches: ";bad;"  Guard errors: ";guard
+250 IF bad=0 AND guard=0 THEN PRINT "PASS: binary round trip"
+260 REMark Reserved memory remains available until reset

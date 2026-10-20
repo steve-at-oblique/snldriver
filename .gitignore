@@ -1,0 +1,16 @@
+# Local Python runtime files
+__pycache__/
+*.py[cod]
+.venv/
+
+# macOS housekeeping
+.DS_Store
+._*
+
+# Host drive contents and QDOS metadata are user data.
+/drive[0-9]*/
+.snl_headers/
+
+# Optional local build and release staging directories
+/build/
+/dist/

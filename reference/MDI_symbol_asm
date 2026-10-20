@@ -1,0 +1,366 @@
+; 29/01/2019
+; Channel definition block / driver headers
+     
+; Channel definition header for all channels
+
+;        offset   0
+ch_len    equ    $00         ;length of definition block
+ch_drivr  equ    $04         ;address of driver
+ch_owner  equ    $08         ;owner job
+ch_rflag  equ    $0C         ;address to be set when space released
+ch_tag    equ    $10         ;channel tag
+ch_stat   equ    $12         ;status: 0 ok, else waiting -1 a1 abs, $80 a1 rel a6
+ch_actn   equ    $13         ;stored action for waiting job
+ch_jobwt  equ    $14         ;ID of job waiting on I/O
+ch_end    equ    $18
+
+; Extended channel definition for plain serial queues
+
+ch_qin    equ    $18         ;pointer to input queue (or zero)
+ch_qout   equ    $1C         ;pointer to output queue (or zero)
+ch_qend   equ    $20
+
+
+; Device driver  header, Linkage block
+
+;        offset   0
+ch_next   equ    $18-$18     ;pointer to next driver
+ch_inout  equ    $1C-$18     ;entry for input and output
+ch_open   equ    $20-$18     ;entry for open
+ch_close  equ    $24-$18     ;entry for close
+; the following  are for directory devices (file system) only:
+ch_slave  equ    $28-$18     ;entry for slaving blocks
+ch_renam  equ    $2C-$18     ;entry reserved for rename
+;         equ    $30-$18
+ch_formt  equ    $34-$18     ;entry for format medium
+ch_dflen  equ    $38-$18     ;length of physical definition block
+ch_drnam  equ    $3C-$18     ;length prefixed drive name
+; Extended linkage block for MDI driver
+ch_aname  equ    $42-$18     ;length prefixed actual drive name
+
+
+; MDI driver storage & work area
+devtable  equ    $48            ;start of device table. Word Write/Protect status
+
+wpflags   equ    devtable       ; w Write/Protect status
+chtable   equ    devtable+$02   ; l*8 channel ID's
+cartname  equ    devtable+$22   ;storage for medium name and random number. 8 x 12 byte entrys
+
+ch_lkend  equ    devtable+$82   ;end of linkage block
+  
+
+; File system definitions
+
+fs.nmlen  equ     36         ;max length of file name
+fs.hdlen  equ     64         ;length of file system header
+
+; File system channel channel definition block
+
+;        offset   $18 ( = ch_end, end of standard channel header )
+fs_next     equ    $18       ;link to next file system channel
+fs_acces    equ    $1C       ;access mode
+fs_drive    equ    $1D       ;drive id
+fs_filnr    equ    $1E       ;file number
+fs_nblok    equ    $20       ;block containing next byte
+fs_nbyte    equ    $22       ;next byte in block
+fs_eblok    equ    $24       ;end of file (block)
+fs_ebyte    equ    $26       ;end of file (byte in block)
+fs_cblok    equ    $28       ;pointer to table for current slave block
+fs_updt     equ    $2C       ;set if file is updated
+fs_usef     equ    $2D       ;parts of file header not to update on close
+fs..bst       equ    0       ;backup date set
+fs..vst       equ    1       ;version set
+fs..ust       equ    2       ;update date set
+
+;           equ    $2E       ;spare
+fs_fname    equ    $32       ;length prefixed file name
+fs_spare    equ    $58       ;72 bytes spare          
+fs_end      equ    $A0
+
+
+; Common part of a physical file system definition block
+
+;        offset   0
+fs_drivr   equ     $10       ;pointer to driver
+fs_drivn   equ     $14       ;drive number
+fs_resve   equ     $15       ;reserved
+fs_mname   equ     $16       ;ds.w   1+10/2  length prefixed medium name
+fs_files   equ     $22       ;ds.b   1       number of files open
+
+  
+; basic I/O keys
+
+; Trap #2 d0 codes
+
+io.open   equ     $01        ;open channel
+io.close  equ     $02        ;close channel
+io.formt  equ     $03        ;format medium
+io.delet  equ     $04        ;delete file
+
+; Trap #2 d3 codes
+
+io.old    equ     $00        ;open old (exclusive) file or device
+io.share  equ     $01        ;open shared (old) file
+io.new    equ     $02        ;open new (exclusive) file
+io.overw  equ     $03        ;open overwrite (or open new) file
+io.dir    equ     $04        ;open directory
+
+; Trap #3 d0 codes
+
+io.pend   equ     $00        ;check for pending input
+io.fbyte  equ     $01        ;fetch a byte
+io.fline  equ     $02        ;fetch a line of bytes
+io.fstrg  equ     $03        ;fetch a string of bytes
+io.edlin  equ     $04        ;edit a line
+io.sbyte  equ     $05        ;send a byte
+
+io.sstrg  equ     $07        ;send a string of bytes
+
+
+; File system trap #3 codes
+
+fs.check  equ     $40        ;check all pending operations
+fs.flush  equ     $41        ;flush buffers
+fs.posab  equ     $42        ;position file pointer (absolute)
+fs.posre  equ     $43        ;position file pointer (relative)
+
+fs.mdinf  equ     $45        ;information about medium
+fs.heads  equ     $46        ;set file header
+fs.headr  equ     $47        ;read file header
+fs.load   equ     $48        ;load file
+fs.save   equ     $49        ;save file
+fs.renam  equ     $4A        ;rename file
+fs.trunc  equ     $4B        ;truncate file
+
+fs.date   equ     $4C        ;set or read file date
+fs.makdr  equ     $4D        ;make directory   -   not implemented
+fs.vers   equ     $4E        ;set or read file version
+fs.xinf   equ     $4F        ;get extended information
+
+
+; Microdrive physical layer definition
+
+;        offset   $10
+md_drivr  equ     $10        ;pointer to driver
+md_drivn  equ     $14        ;drive number
+;         equ     $15        ;spare
+md_mname  equ     $16        ;length prefixed medium name and check number
+md_files  equ     $22        ;number of files open
+md_estat  equ     $23        ;error status 0=ok -1=bad
+md_fail   equ     $24        ;failure count
+md_resve  equ     $25        ;spare
+md_map    equ     $28        ;microdrive map (fe bad, fd vac, fc pending delete)
+md_lsect  equ     $226       ;last sector allocated.
+md_pendg  equ     $228       ;pending operations: 0 no, >0 slave block nr
+                             ;   -1 write map, -2 verify map
+md_end    equ     $428
+
+
+; Directory structure definitions
+
+;        offset   0
+md_delen  equ     $0         ;length
+md_deacs  equ     $04        ;access key
+md_detyp  equ     $05        ;type
+md_deinf  equ     $06        ;information (data space first)
+md_denam  equ     $0E        ;length prefixed file name
+md_deupd  equ     $34        ;update date
+md_unit   equ     $38        ;unit and version
+md_debkd  equ     $3C        ;backup date
+md_deend  equ     $40
+
+
+; Error keys
+
+err.nc  equ      -1          ;not complete
+err.nj  equ      -2          ;invalid Job
+err.om  equ      -3          ;out of memory
+err.or  equ      -4          ;out of range
+err.bo  equ      -5          ;buffer full
+err.no  equ      -6          ;channel not open
+err.nf  equ      -7          ;not found
+err.ex  equ      -8          ;already exists
+err.iu  equ      -9          ;in use
+err.ef  equ      -10         ;end of file
+err.df  equ      -11         ;drive full
+err.bn  equ      -12         ;bad name
+err.te  equ      -13         ;Xmit error
+err.ff  equ      -14         ;format failed
+err.bp  equ      -15         ;bad parameter
+err.fe  equ      -16         ;bad or changed medium
+err.xp  equ      -17         ;error in expression
+err.ov  equ      -18         ;overflow
+err.ni  equ      -19         ;not implemented yet
+err.ro  equ      -20         ;read only
+err.bl  equ      -21         ;bad line
+err.at  equ      -22         ;At line (+ space, no LF)
+err.sc  equ      -23         ;sectors
+err.bt  equ      -24         ;<boot message>
+err.cp  equ      -25         ;<copyright message>
+err.wh  equ      -26         ;during WHEN processing
+err.pf  equ      -27         ;PROC/FN cleared
+
+
+; System variable definitions
+   
+;        offset   0
+sv_ident  equ     $00        ;identification word
+;         equ     $02        ;spare
+sv_cheap  equ     $04        ;base of common heap area
+sv_chpfr  equ     $08        ;first free space in common heap area
+sv_free   equ     $0C        ;base of free area
+sv_basic  equ     $10        ;base of basic area
+sv_trnsp  equ     $14        ;base of transient program area
+sv_trnfr  equ     $18        ;first free space in transient program area
+sv_respr  equ     $1C        ;base of resident procedure area
+sv_ramt   equ     $20        ;top of ram (+1)
+;         equ     $24        ;5 spare words
+sv_rand   equ     $2E        ;random number
+sv_pollm  equ     $30        ;count of poll interupts missed
+sv_tvmod  equ     $32        ;0 if not tv display
+sv_scrst  equ     $33        ;screen status (0 = active)
+sv_mcsta  equ     $34        ;display mode of current job 0/8 mode4/mode8
+sv_pcint  equ     $35        ;current value of pc interrupt register
+;         equ     $36        ;1 spare byte
+sv_netnr  equ     $37        ;network station number
+
+sv_i2lst  equ     $38        ;pointer to list of interrupt 2 drivers
+sv_plist  equ     $3C        ;pointer to list of polled tasks
+sv_shlst  equ     $40        ;pointer to list of scheduler tasks
+sv_drlst  equ     $44        ;pointer to list of device drivers
+sv_ddlst  equ     $48        ;pointer to list of directory device drivers
+sv_keyq   equ     $4C        ;pointer to a keyboard queue
+sv_trapv  equ     $50        ;pointer to the trap redirection table
+
+; Pointers to the resource management tables
+; The slave block tables have 8 byte entries, the others 4 byte entries
+
+sv_btpnt  equ     $54        ;pointer to most recent slave block entry
+sv_btbas  equ     $58        ;pointer to base of slave block table
+sv_bttop  equ     $5C        ;pointer to top of slave block table
+
+sv_jbtag  equ     $60        ;current value of job tag
+sv_jbmax  equ     $62        ;highest current job number
+sv_jbpnt  equ     $64        ;pointer to current job table entry
+sv_jbbas  equ     $68        ;pointer to base of job table
+sv_jbtop  equ     $6C        ;pointer to top of job table
+
+sv_chtag  equ     $70        ;current value of channel tag
+sv_chmax  equ     $72        ;highest current channel number
+sv_chpnt  equ     $74        ;pointer to last channel checked
+sv_chbas  equ     $78        ;pointer to base of channel table
+sv_chtop  equ     $7C        ;pointer to top of channel table, and extended sysvars
+
+sv_frbl   equ     $80        ;interrupt level release memory linked list (sms2)
+;         equ     $84        ;spare
+;         equ     $85        ;set to $ff by ptrgen if this is a ql!
+;         equ     $86        ;spare
+
+sv_caps   equ     $88        ;caps lock 0=off $ff=on
+;         equ     $89        ;but people may overwrite as above was defined as w!
+sv_arbuf  equ     $8A        ;autorepeat buffer
+sv_ardel  equ     $8C        ;autorepeat delay
+sv_arfrq  equ     $8E        ;autorepeat 1/freq
+sv_arcnt  equ     $90        ;autorepeat count
+sv_cqch   equ     $92        ;keyboard change queue character code (can be + alt!)
+sv_wp     equ     $94        ;microdrive write protect (1st byte) ipc p26 input
+sv_sound  equ     $96        ;sound status (only 1st byte used?)
+sv_ser1c  equ     $98        ;receive  channel 1 queue address
+sv_ser2c  equ     $9C        ;receive  channel 2 queue address
+sv_tmode  equ     $A0        ;ZX8302 transmit mode (includes last baud rate)
+;         equ     $10        ;spare
+sv_csub   equ     $A2        ;subroutine to jump to on capslock (only reach + 32767!)
+sv_timo   equ     $A6        ;timeout for switching transmit mode
+sv_timov  equ     $A8        ;ser1/2 control bytes: 7=lost 6=frame 3=inhib 2..0=baud
+sv_fstat  equ     $AA        ;flashing cursor count (silly if > about 16!)
+
+sv_progd  equ     $AC        ;to $60 byte extension, old progd string + qlib_use
+sv_datad  equ     $B0        ;to data default string, this -$24 = new progd
+sv_destd  equ     $B4        ;to dest default string, this is above + $24
+sv_thing  equ     $B8        ;thing list
+
+;         equ     $BC        ;25 spare words
+
+sv_mdrun  equ     $EE        ;which drive is running?
+sv_mdcnt  equ     $EF        ;microdrive run-up run-down counter
+sv_mddid  equ     $F0        ;drive id*4 of each microdrive
+sv_mdsta  equ     $F8        ;status, 0 = no pending ops
+
+sv_fsdef  equ     $100       ;pointers to file system physical definition
+sv_fslst  equ     $140       ;pointer to list of file channel definitions
+
+sv_tran   equ     $144       ;key translation off(0) or on(1)
+sv_ichar  equ     $145       ;compose char workspace
+sv_trtab  equ     $146       ;pointer to key translation tables
+sv_mgtab  equ     $14A       ;pointer to message table
+
+
+;daytab    equ     $1c       ;err. for names of days
+;montab    equ     $1d       ;err. names of months
+;          ds.w     3
+;sv_turb1  ds.l    1         ;used by turbo
+;sv_turb2  ds.l    1
+;sv_turb3  ds.w    1         ;length of file name!!!!
+;sv_turb4  ds.b    32        ;actually uses up to 41 bytes for file name!!!!!!
+;* taskmaster uses $154 l*4
+
+sv_stacb  equ     $180       ;bottom of stack (192 long)
+sv_stact  equ     $480       ;big stack - no check
+
+sv_trapo  equ     $54        ;2*($28+2) offset of trap vector table from (sv_trapv)
+
+sv.ident  equ     $D254      ;green, red, blue and black, with flash bits
+
+
+; Device driver  definitions (for the driver's own pseudo system vars)
+;        offset   0
+sv_lxint  equ     $00        ;link to next external interrupt service
+sv_axint  equ     $04        ;address of external interrupt service
+sv_lpoll  equ     $08        ;link to next polling interrupt service
+sv_apoll  equ     $0C        ;address of polling interrupt service
+sv_lschd  equ     $10        ;link to next scheduler task
+sv_aschd  equ     $14        ;address of scheduler task
+sv_lio    equ     $18        ;link to next io driver
+sv_aio    equ     $1C        ;address of input/output routine
+sv_aopen  equ     $20        ;address of channel open routine
+sv_aclos  equ     $24        ;address of channel close routine
+
+
+; BASIC variable definitions
+bv_bfbas  equ     $00        ;pointer to BASIC buffer base
+bv_ntbas  equ     $18        ;pointer to name table
+bv_nlbas  equ     $20        ;pointer to name list
+bv_rip    equ     $58        ;pointer to maths stack
+
+
+; Extended information block for MDI device level 2/3 update
+ioi_name    equ   $00        ; string  up to 20 character medium name (null filled)
+ioi_dnam    equ   $16        ; string  up to 4 character long device name (e.g. WIN)
+ioi_dnum    equ   $1c        ; byte           drive number
+ioi_rdon    equ   $1d        ; byte           set if read only
+ioi_allc    equ   $1e        ; word           allocation unit size (in bytes)
+ioi_totl    equ   $20        ; long           total medium size (in allocation units)
+ioi_free    equ   $24        ; long           free space on medium (in allocation units)
+ioi_hdrl    equ   $28        ; long           header length (per file storage overhead)
+ioi_ftyp    equ   $2c        ; byte           format type (1=QDOS, 2=MSDOS etc)
+ioi_styp    equ   $2d        ; byte           format sub-type
+ioi_dens    equ   $2e        ; byte           density
+ioi_mtyp    equ   $2f        ; byte           medium type (RAM=0, FLP=1, HD=2, CD=3)
+ioi_remv    equ   $30        ; byte           set if removable
+ioi_xxx1    equ   $31        ; $0f           bytes set to -1
+ioi.blkl    equ   $40        ; information block length
+
+
+
+; Definitions for image file conversion routines
+mdisect  equ      534        ;MDI sector length
+qemusect equ      528        ;Qemulator sector size
+qlaysect equ      686        ;QLay sector size
+
+mdi_file equ      136170     ;MDI file length
+qlayfile equ      174930     ;QLay file length
+
+inchid   equ      $00        ;offset to input channel ID in buffer
+outchid  equ      $04        ;offset to output channel ID in buffer
+headbuff equ      $08        ;offset to start of header area in buffer
+sectbuff equ      $18        ;offset to start of sector area in buffer

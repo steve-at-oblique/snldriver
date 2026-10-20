@@ -1,0 +1,490 @@
+"""SNL protocol v2 server. See docs/SERIAL_OPEN.md for the wire format."""
+import errno
+import io
+import json
+import os
+import shutil
+from pathlib import Path
+import struct
+import sys
+import tempfile
+import time
+
+CONFIG_PATH = "snl_config.json"
+MAX_BLOCK = 512
+MAX_FILE = 0x7FFFFFFF
+EMULATOR_MAGIC = b"]!QDOS File Header"
+READY_REQUEST = b"~SNL?"
+READY_REPLY = b"~SNL!"
+READY_TOKEN_LENGTH = 16  # two 32-bit values encoded as ASCII A..P nibbles
+
+
+def read_ready_probe(port):
+    """Read after '~'; another '~' restarts an interrupted probe.
+
+    Probe bytes are outside the binary command range. A daemon starting in
+    the middle of a probe can safely discard its tail as unknown commands.
+    """
+    candidate = bytearray(b"~")
+    while True:
+        byte = read_exact(port, 1)
+        if byte == b"~":
+            candidate = bytearray(byte)
+            continue
+        candidate.extend(byte)
+        if byte == b"\n":
+            token = bytes(candidate[5:-1])
+            if (candidate.startswith(READY_REQUEST) and len(token) == READY_TOKEN_LENGTH
+                    and all(65 <= value <= 80 for value in token)):
+                return token
+            return None
+        if len(candidate) >= 22:
+            return None
+NF, EX, IU, EF, DF, BN, TE, BP, NI, RO = -7, -8, -9, -10, -11, -12, -13, -15, -19, -20
+
+
+class QDOSError(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def status(code):
+    return bytes((code & 255,))
+
+
+def read_exact(port, count):
+    data = bytearray()
+    while len(data) < count:
+        part = port.read(count - len(data))
+        if not part:
+            raise EOFError("Serial stream ended inside a packet")
+        data.extend(part)
+    return bytes(data)
+
+
+def write_all(port, data):
+    view = memoryview(data)
+    while view:
+        sent = port.write(view)
+        if not sent:
+            raise OSError("Serial write made no progress")
+        view = view[sent:]
+
+
+def write_reply(port, data, reply_delay=0, byte_delay=0):
+    """Diagnostic pacing for the original QL; delays are seconds."""
+    if reply_delay:
+        time.sleep(reply_delay)
+    if not byte_delay:
+        write_all(port, data)
+        return
+    for index, byte in enumerate(data):
+        write_all(port, bytes((byte,)))
+        port.flush()  # do not let USB buffering turn paced writes into a burst
+        if index + 1 < len(data):
+            time.sleep(byte_delay)
+
+
+def error_code(exc):
+    if isinstance(exc, QDOSError):
+        return exc.code
+    if isinstance(exc, FileNotFoundError):
+        return NF
+    if isinstance(exc, FileExistsError):
+        return EX
+    if isinstance(exc, PermissionError):
+        return RO
+    if isinstance(exc, (UnicodeError, ValueError, IsADirectoryError)):
+        return BN
+    if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG):
+        return DF
+    return TE
+
+
+class Session:
+    """One file per connection; translate emulator wrappers to QDOS metadata."""
+    def __init__(self, drives):
+        self.drives = {str(k): Path(v).resolve() for k, v in drives.items()}
+        self.file = None
+        self.path = None
+        self.name = b""
+        self.mode = 1
+        self.header = bytearray(64)
+        self.payload_base = 0
+        self.drive = None
+
+    def require_file(self, writing=False):
+        if self.file is None:
+            raise QDOSError(-6)
+        if writing and self.mode in (1, 4):
+            raise QDOSError(RO)
+
+    def meta_path(self):
+        return self.path.parent / ".snl_headers" / (self.path.name + ".json")
+
+    def save_header(self):
+        self.require_file(writing=True)
+        dest = self.meta_path()
+        dest.parent.mkdir(exist_ok=True)
+        # Keep metadata inside the drive even if an administrator placed a symlink.
+        if dest.parent.resolve() != self.path.parent / ".snl_headers":
+            raise QDOSError(BN)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=dest.parent, delete=False) as out:
+                tmp = out.name
+                json.dump({"header": self.header.hex()}, out)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, dest)
+            tmp = None
+        finally:
+            if tmp is not None:
+                os.unlink(tmp)
+
+    def resolve_name(self, drive, name):
+        root = self.drives.get(str(drive))
+        if root is None or not root.is_dir():
+            raise QDOSError(NF)
+        text = name.decode("ascii")
+        if not 1 <= len(name) <= 36 or text in (".", "..") or any(c in text for c in ("/", "\\", "\x00")) or text.lower().startswith(".snl_"):
+            raise QDOSError(BN)
+        # Match QDOS names without changing the host's stored spelling.
+        # Scan on every OPEN so emulator-created files are visible immediately.
+        matches = [entry for entry in root.iterdir()
+                   if entry.name.isascii() and entry.name.lower() == text.lower()]
+        if len(matches) > 1:
+            raise QDOSError(BN)  # two Linux names cannot identify one QDOS file
+        path = matches[0] if matches else root / text
+        if path.resolve().parent != root:
+            raise QDOSError(BN)
+        return path
+
+    def delete(self, drive, name):
+        if self.file is not None:
+            raise QDOSError(IU)
+        path = self.resolve_name(drive, name)
+        if path.is_symlink():
+            raise QDOSError(BN)
+        if not path.exists():
+            raise QDOSError(NF)
+        if not path.is_file():
+            raise QDOSError(BN)
+        directory = path.parent / ".snl_headers"
+        meta = directory / (path.name + ".json")
+        if directory.is_symlink() or meta.is_symlink() or (meta.exists() and not meta.is_file()):
+            raise QDOSError(BN)
+        path.unlink()
+        meta.unlink(missing_ok=True)
+
+    def open(self, drive, mode, name):
+        if mode == 4:
+            return self.open_directory(drive, name)
+        if mode not in (0, 1, 2, 3):
+            raise QDOSError(NI)
+        path = self.resolve_name(drive, name)
+        root = path.parent
+        if mode == 2 and path.exists():
+            raise QDOSError(EX)
+        # A new OPEN recovers a stale session after a QL-side port close/reopen.
+        self.close()
+        header = bytearray(64)
+        meta = root / ".snl_headers" / (path.name + ".json")
+        if (root / ".snl_headers").is_symlink():
+            raise QDOSError(BN)
+        f = path.open({0: "r+b", 1: "rb", 2: "x+b", 3: "w+b"}[mode], buffering=0)
+        base = 0
+        try:
+            size = os.fstat(f.fileno()).st_size
+            if mode in (0, 1):
+                prefix = f.read(44)
+                if prefix.startswith(EMULATOR_MAGIC):
+                    # sQLux FillQemulator/QHSetHeader: length is BE words.
+                    if len(prefix) < 20:
+                        raise QDOSError(BN)
+                    base = int.from_bytes(prefix[18:20], "big") * 2
+                    if base not in (30, 44) or size < base:
+                        raise QDOSError(BN)
+                    header[4:14] = prefix[20:30]
+                elif meta.exists():
+                    if meta.is_symlink():
+                        raise QDOSError(BN)
+                    raw = bytes.fromhex(json.loads(meta.read_text())["header"])
+                    if len(raw) != 64:
+                        raise QDOSError(BN)
+                    header[:] = raw
+            size -= base
+            if size > MAX_FILE:
+                raise QDOSError(-4)
+        except Exception:
+            f.close()
+            raise
+        self.file, self.path, self.name, self.mode = f, path, path.name.encode("ascii"), mode
+        self.header = header
+        self.payload_base = base
+        self.drive = str(drive)
+        try:
+            if mode in (2, 3):
+                self.save_header()  # discard stale metadata after overwrite
+        except Exception:
+            f.close()
+            self.file = None
+            raise
+        return size
+
+    def open_directory(self, drive, name):
+        root = self.drives.get(str(drive))
+        if root is None or not root.is_dir():
+            raise QDOSError(NF)
+        prefix = name.decode("ascii")
+        if len(name) > 36 or prefix in (".", "..") or any(c in prefix for c in ("/", "\\", "\x00")) or prefix.lower().startswith(".snl_"):
+            raise QDOSError(BN)
+        self.close()
+        records = bytearray()
+        seen = set()
+        reader = Session({str(drive): root})
+        try:
+            for path in sorted(root.iterdir(), key=lambda p: (p.name.lower(), p.name)):
+                text = path.name
+                if (text.startswith(".") or not text.isascii() or len(text) > 36
+                        or "\\" in text or not text.lower().startswith(prefix.lower())
+                        or path.is_symlink() or not path.is_file()):
+                    continue
+                if text.lower() in seen:
+                    raise QDOSError(BN)
+                seen.add(text.lower())
+                # Reuse the exact OPEN metadata/wrapper interpretation.
+                reader.open(drive, 1, text.encode("ascii"))
+                header = bytearray(reader.read_header())
+                size = reader.file_size()
+                # Directory records use QDOS's stored length including header.
+                header[:4] = struct.pack(">I", size + 64)
+                records.extend(header)
+                reader.close()
+                if len(records) > MAX_FILE:
+                    raise QDOSError(-4)
+        finally:
+            reader.close()
+        self.file = io.BytesIO(records)
+        self.path, self.name, self.mode = root, name, 4
+        self.drive = str(drive)
+        self.header, self.payload_base = bytearray(64), 0
+        self.header[5] = 255  # directory
+        return len(records)
+
+    def file_size(self):
+        if self.mode == 4:
+            return self.file.getbuffer().nbytes
+        return os.fstat(self.file.fileno()).st_size - self.payload_base
+
+    def medium_info(self):
+        self.require_file()
+        root = self.path if self.mode == 4 else self.path.parent
+        usage = shutil.disk_usage(root)
+        # Stock DIR prints these 16-bit counts as signed decimal words.
+        # Cap rather than wrap/print negatives on modern Linux volumes.
+        free = min(usage.free // 512, 32767)
+        total = min(usage.total // 512, 32767)
+        label = ("SNL" + self.drive).encode("ascii")[:10].ljust(10, b" ")
+        return struct.pack(">HH", free, total) + label
+
+    def read(self, offset, count):
+        self.require_file()
+        if not 0 <= offset <= MAX_FILE or not 0 <= count <= MAX_BLOCK:
+            raise QDOSError(BP)
+        self.file.seek(self.payload_base + offset)
+        return self.file.read(count)
+
+    def write(self, offset, data):
+        self.require_file(writing=True)
+        if offset < 0 or offset > MAX_FILE or offset + len(data) > MAX_FILE or len(data) > MAX_BLOCK:
+            raise QDOSError(BP)
+        self.file.seek(self.payload_base + offset)
+        # Return an actual count; a short disk write must never be acknowledged as full.
+        return self.file.write(data)
+
+    def read_header(self):
+        self.require_file()
+        header = self.header.copy()
+        header[:4] = struct.pack(">I", self.file_size())
+        header[14:52] = struct.pack(">H", len(self.name)) + self.name.ljust(36, b"\x00")
+        return bytes(header)
+
+    def set_header(self, data):
+        self.require_file(writing=True)
+        if self.payload_base:
+            # Keep the wrapper authoritative; never create a competing sidecar.
+            self.file.seek(20)
+            write_all(self.file, data[4:14])
+            self.flush()
+            self.header[4:14] = data[4:14]
+        else:
+            self.header[4:14] = data[4:14]  # length is maintained from the payload
+            self.save_header()
+
+    def flush(self):
+        self.require_file()
+        if self.mode not in (1, 4):
+            self.file.flush()
+            os.fsync(self.file.fileno())
+
+    def close(self):
+        if self.file is not None:
+            try:
+                self.flush()
+            finally:
+                self.file.close()
+                self.file = None
+
+
+def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
+    """Consume one complete request; errors retain each command's reply shape."""
+    cmd = read_exact(port, 1)[0]
+    if cmd == ord("~"):
+        token = read_ready_probe(port)
+        if token is not None:
+            # No SNL channel is active when the driver sends this probe.
+            # Release any stale host session left by a previous QL reset.
+            session.close()
+            write_reply(port, READY_REPLY + token + b"\n", reply_delay, byte_delay)
+            if trace:
+                print(f"SNL READY token={token.decode('ascii')}", flush=True)
+        return
+    if trace:
+        names = {0x11: "OPEN", 0x12: "READ", 0x13: "WRITE", 0x04: "CLOSE",
+                 0x15: "READ HEADER", 0x16: "SET HEADER", 0x17: "FLUSH", 0x18: "MEDIUM INFO"}
+    if trace:
+        print(f"RX command=${cmd:02X} {names.get(cmd, 'UNKNOWN')}", flush=True)
+    if cmd == 0x11:
+        drive, mode, length = read_exact(port, 3)
+        name = read_exact(port, length)
+        if trace:
+            print(f"  drive={drive} mode={mode} name_length={length} name={name!r}", flush=True)
+        try:
+            if mode == 255:  # QDOS directory DELETE uses OPEN mode -1.
+                session.delete(drive, name)
+                reply = status(0)
+            else:
+                size = session.open(drive, mode, name)
+                reply = status(0) + struct.pack(">I", size)
+        except (OSError, ValueError, UnicodeError, KeyError, QDOSError) as exc:
+            reply = status(error_code(exc))
+    elif cmd in (0x12, 0x13):
+        offset, count = struct.unpack(">IH", read_exact(port, 6))
+        if trace:
+            print(f"  offset={offset} count={count}", flush=True)
+        # Consume the entire write frame even when rejecting it.
+        data = read_exact(port, count) if cmd == 0x13 else None
+        try:
+            if cmd == 0x12:
+                data = session.read(offset, count)
+                reply = status(0 if len(data) == count else EF) + struct.pack(">H", len(data)) + data
+            else:
+                actual = session.write(offset, data)
+                reply = status(0 if actual == count else DF) + struct.pack(">H", actual)
+        except (OSError, ValueError, QDOSError) as exc:
+            reply = status(error_code(exc)) + b"\x00\x00"
+    elif cmd in (0x04, 0x15, 0x16, 0x17, 0x18):
+        data = read_exact(port, 14) if cmd == 0x16 else None
+        try:
+            if cmd == 0x04:
+                session.close()
+                reply = status(0)
+            elif cmd == 0x15:
+                reply = status(0) + session.read_header()
+            elif cmd == 0x16:
+                session.set_header(data)
+                reply = status(0)
+            elif cmd == 0x18:
+                reply = status(0) + session.medium_info()
+            else:
+                session.flush()
+                reply = status(0)
+        except (OSError, ValueError, QDOSError) as exc:
+            reply = status(error_code(exc))
+    else:
+        # Stray terminal/transfer bytes are not requests. An unsolicited error
+        # here would be mistaken for the response to the next valid OPEN.
+        if trace:
+            print(f"DROP unknown command=${cmd:02X}; no reply", flush=True)
+        return
+    code = reply[0] if reply[0] < 128 else reply[0] - 256
+    if trace:
+        print(f"TX command=${cmd:02X} status=${reply[0]:02X} ({code}) reply_bytes={len(reply)}", flush=True)
+    if cmd == 0x11:
+        if trace:
+            print(f"  OPEN reply wire: {reply.hex(' ')}", flush=True)
+    elif cmd in (0x12, 0x13):
+        if trace:
+            print(f"  Reply header: {reply[:3].hex(' ')}", flush=True)
+    write_reply(port, reply, reply_delay=reply_delay, byte_delay=byte_delay)
+    if trace:
+        print(f"Reply written for command=${cmd:02X}", flush=True)
+
+
+def serve_link_test(port, reply_delay=0, byte_delay=0):
+    """Standalone control test; deliberately separate from the file protocol."""
+    cmd = read_exact(port, 1)
+    if cmd != b"~":
+        print(f"LINK TEST ignored ${cmd[0]:02X}", flush=True)
+        return
+    reply = b"\x00\x00\x00\x00\x17"
+    print("LINK TEST request received; reply: 00 00 00 00 17", flush=True)
+    write_reply(port, reply, reply_delay=reply_delay, byte_delay=byte_delay)
+    print("LINK TEST reply written", flush=True)
+
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    return {"serial_port": "/dev/ttyUSB0", "baud_rate": 9600, "drives": {"1": "./drive1"}}
+
+
+def serial_settings(config):
+    # Original QL requires >=1.5 stop bits when receiving at 9600 baud.
+    stop_bits = config.get("stop_bits", 2)
+    if stop_bits not in (1, 1.5, 2):
+        raise ValueError("stop_bits must be 1, 1.5 or 2")
+    return {"baudrate": config.get("baud_rate", 9600), "bytesize": 8,
+            "parity": "N", "stopbits": stop_bits, "timeout": None,
+            "xonxoff": False, "rtscts": config.get("rtscts", False)}
+
+
+def main():
+    import serial
+    config = load_config()
+    port, baud = config.get("serial_port", "/dev/ttyUSB0"), config.get("baud_rate", 9600)
+    session = Session(config.get("drives", {}))
+    settings = serial_settings(config)
+    reply_delay = float(config.get("reply_delay_ms", 0)) / 1000
+    byte_delay = float(config.get("inter_byte_delay_ms", 0)) / 1000
+    if reply_delay < 0 or byte_delay < 0:
+        raise ValueError("Serial reply delays must be nonnegative")
+    trace = config.get("trace", False)
+    print(f"SNL protocol v2 daemon on {port} at {baud} baud; drives: {list(session.drives)}", flush=True)
+    if trace:
+        print(f"Script: {Path(__file__).resolve()}; config: {Path(CONFIG_PATH).resolve()}; trace={trace}", flush=True)
+    print(f"Serial: 8 data bits, no parity, {settings['stopbits']} stop bits; rtscts={settings['rtscts']}", flush=True)
+    print("Readiness handshake: enabled", flush=True)
+    if trace or reply_delay or byte_delay:
+        print(f"Reply pacing: initial={reply_delay * 1000:g} ms, between bytes={byte_delay * 1000:g} ms", flush=True)
+    try:
+        with serial.Serial(port, **settings) as ser:
+            if "--link-test" in sys.argv[1:]:
+                print("LINK TEST ONLY: waiting for '~'; do not install SNL on the QL", flush=True)
+                while True:
+                    serve_link_test(ser, reply_delay=reply_delay, byte_delay=byte_delay)
+            else:
+                while True:
+                    serve_one(ser, session, trace=trace, reply_delay=reply_delay, byte_delay=byte_delay)
+    except KeyboardInterrupt:
+        pass
+    except (OSError, EOFError, serial.SerialException) as exc:
+        print(f"Serial error: {exc}", file=sys.stderr)
+    finally:
+        session.close()
+
+
+if __name__ == "__main__":
+    main()
