@@ -1,0 +1,45 @@
+10 REMark Raw USB integrity test: 4096 bytes, 0..255 repeated 16 times
+20 REMark Linux: qimsi_send.py qimsi_binary.dat --binary --chunk-size 16
+30 REMark Default delay 0.05: integrity test, not a throughput benchmark
+40 INPUT "New RAM filename (e.g. ram1_raw_bin): ";f$
+50 OPEN_NEW #4,f$
+60 OPEN_IN #3,ser2idr
+70 PRINT "Ready for 4096 raw bytes. Start Linux sender within 60 seconds."
+80 FOR i=0 TO 4095
+90   wait=150
+100   IF i=0 THEN wait=3000
+110   b$=INKEY$(#3,wait)
+120   IF LEN(b$)<>1 THEN
+130     PRINT "FAIL: timeout at byte offset ";i
+140     CLOSE #3
+150     CLOSE #4
+160     STOP
+170   END IF
+180   want=i-256*INT(i/256)
+190   got=CODE(b$)
+200   IF got<>want THEN
+210     PRINT "FAIL: byte offset ";i;" (first byte is 0)"
+220     PRINT "Expected ";want;"; received ";got
+230     CLOSE #3
+240     CLOSE #4
+250     STOP
+260   END IF
+270   PRINT #4,b$;
+280 END FOR i
+290 b$=INKEY$(#3,50)
+300 CLOSE #3
+310 CLOSE #4
+320 IF LEN(b$)<>0 THEN
+330   PRINT "FAIL: extra data after 4096 bytes"
+340   STOP
+350 END IF
+360 OPEN_IN #4,f$
+370 n=FLEN(#4)
+380 CLOSE #4
+390 IF n<>4096 THEN
+400   PRINT "FAIL: saved length ";n;"; expected 4096"
+410   STOP
+420 END IF
+430 PRINT "PASS: Linux to QL, all 4096 bytes verified and saved."
+440 PRINT "Start Linux qimsi_receive.py with the binary reference."
+450 PRINT "Then type: COPY_N ";f$;" TO ser2idr"

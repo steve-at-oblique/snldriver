@@ -1,0 +1,42 @@
+10 REMark Check Linux speed.dat: 0123456789ABCDEF repeated, 262144 bytes
+20 REMark Checks a completed RAM file, not the live serial port
+30 INPUT "Received filename (e.g. ram1_speed40_dat): ";f$
+40 OPEN_IN #3,f$
+50 n=262144
+60 actual=FLEN(#3)
+70 IF actual<>n THEN
+80   PRINT "FAIL: length ";actual;"; expected ";n
+90   CLOSE #3
+100   STOP
+110 END IF
+120 pattern$="0123456789ABCDEF"
+130 PRINT "Checking ";n;" bytes..."
+140 FOR i=0 TO n-1
+150   IF EOF(#3) THEN
+160     PRINT "FAIL: early EOF at byte offset ";i
+170     CLOSE #3
+180     STOP
+190   END IF
+200   b$=INKEY$(#3)
+210   IF LEN(b$)<>1 THEN
+220     PRINT "FAIL: no byte read at offset ";i
+230     CLOSE #3
+240     STOP
+250   END IF
+260   j=1+i-16*INT(i/16)
+270   want=CODE(pattern$(j))
+280   got=CODE(b$)
+290   IF got<>want THEN
+300     PRINT "FAIL: byte offset ";i;" (first byte is 0)"
+310     PRINT "Expected ASCII ";want;"; received ";got
+320     CLOSE #3
+330     STOP
+340   END IF
+350 END FOR i
+360 IF NOT EOF(#3) THEN
+370   PRINT "FAIL: extra data after ";n;" bytes"
+380   CLOSE #3
+390   STOP
+400 END IF
+410 CLOSE #3
+420 PRINT "PASS: all ";n;" bytes match speed.dat"
