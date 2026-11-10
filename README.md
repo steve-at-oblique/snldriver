@@ -1,9 +1,23 @@
 # SNL — serial filesystem for the Sinclair QL (Saturday Night Live driver!)
 
 SNL lets a Sinclair QL load, save and run files stored in Linux directories,
-using SER2 and a Python daemon. The current driver is V2.15, assembled with
+using SER2 and a Python daemon. The checked-in binary is V2.15, assembled with
 Talent/Quanta Assembler 2.02 and tested on stock physical QL hardware (US
 version with ROM JSU).
+
+The development assembly source is now a **V2.24 batched READ-header candidate**
+for SMSQ/E on QIMSI Gold, with hardware test results through V2.24. The
+distributed binary has not been replaced. See the
+[QIMSI hardware test guide](docs/QIMSI_SMSQE_TEST.md) for building a separate
+candidate and [READ-header guide](docs/BULK_READ_HEADERS.md) for V2.24 testing
+with the existing read profiler.
+
+QIMSI Gold testing confirmed BASIC load/save/overwrite, binary round trips,
+directory operations, executable loading and daemon recovery. Large QL Mode 4
+benchmarks reached 116.36 KiB/s writing with V2.21 and 80 KiB/s reading with
+V2.22; the V2.24 instrumented read run passed at 83.93 KiB/s. See the linked
+guides for test scope, display modes, timing limits and known limitations.
+Original QL/Minerva regression testing of the combined source remains pending.
 
 Verified operations include BASIC LOAD/SAVE, binary LBYTES/SBYTES, executable
 loading, DIR, DELETE, and the QL Monitor/assembler and Toolkit II overwrite
@@ -109,10 +123,12 @@ From the repository root:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -q
 ```
 
-The 84 tests cover the daemon and an interpreter of the actual assembly source.
-They do not replace Talent assembly or physical serial testing. The reformatted
-source has also been assembled on the QL and byte-compared successfully with
-the preceding build.
+The 120 tests cover the daemon and an interpreter of the actual assembly source,
+including transport errors, register/stack handling, alignment and profiling.
+They do not replace Talent assembly or physical serial testing. The V2.24
+source has been assembled and its diagnostic read test passed on QIMSI Gold;
+the earlier source-format cleanup was also byte-compared with its preceding
+build.
 
 Start with the [documentation index](docs/README.md) for hardware tests,
 bootstrap instructions, protocol details and historical development notes.

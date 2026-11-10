@@ -1,0 +1,63 @@
+10 REMark V2.23 read profiler: use an existing throughput benchmark file
+20 IF MACHINE<>21 THEN PRINT "Requires SMSQ/E on QIMSI Gold": STOP
+30 INPUT "V2.23 load address in HEX (no $ prefix): ";a$
+35 a=HEX(a$)
+40 IF a<=0 OR a<>2*INT(a/2) THEN PRINT "Invalid address": STOP
+50 IF PEEK$(a+4,4)<>"SNLP" THEN PRINT "Not a profiling build": STOP
+60 l=PEEK_L(a+8)
+70 IF l<=0 OR l<>2*INT(l/2) THEN PRINT "Driver not installed": STOP
+80 IF PEEK(l+97)=0 THEN PRINT "Not the QIMSI USB profile": STOP
+90 POKE l+100,0
+100 INPUT "Existing SNL benchmark filename (e.g. snl6_bench1_bin): ";f$
+110 OPEN_IN #3,f$
+120 n=FLEN(#3)
+130 CLOSE #3
+140 IF n<>262144 THEN PRINT "Expected 262144-byte benchmark file": STOP
+150 reps=20
+160 p=ALCHP(n+32)
+170 IF p=0 THEN PRINT "Not enough memory": STOP
+180 b=p+16
+190 FOR i=0 TO 15: POKE p+i,165: POKE b+n+i,165
+200 block$=FILL$(CHR$(90),256)
+210 FOR i=0 TO n-256 STEP 256: POKE$ b+i,block$
+220 FOR i=112 TO 148 STEP 4: POKE_L l+i,0
+230 POKE_W l+102,-1
+240 PRINT "Profiling ";reps;" loads; no output during timing..."
+250 POKE l+100,1
+260 t=DATE
+270 FOR r=1 TO reps: LBYTES f$,b
+280 elapsed=DATE-t
+290 POKE l+100,0
+300 PRINT "Checking final data (not timed)..."
+310 bad=0
+320 FOR i=0 TO n-1
+330   IF PEEK(b+i)<>i-256*INT(i/256) THEN
+340     PRINT "FAIL: byte offset ";i
+350     bad=1
+360     EXIT i
+370   END IF
+380 END FOR i
+390 FOR i=0 TO 15
+400   IF PEEK(p+i)<>165 OR PEEK(b+n+i)<>165 THEN bad=1
+410 END FOR i
+420 RECHP p
+430 IF bad<>0 THEN PRINT "FAIL: payload or guard check": STOP
+440 PRINT "PASS: final payload and memory guards"
+450 PRINT "Loads: ";reps;"; payload bytes: ";n*reps
+460 PRINT "Wall seconds: ";elapsed
+470 IF elapsed>0 THEN PRINT "Read KiB/s: ";n*reps/1024/elapsed
+480 total=0
+490 FOR i=112 TO 124 STEP 4: total=total+PEEK_L(l+i)
+500 PRINT "REQUEST ticks: ";PEEK_L(l+112);"; seconds: ";PEEK_L(l+112)/50
+510 PRINT "REPLY HEADER ticks: ";PEEK_L(l+116);"; seconds: ";PEEK_L(l+116)/50
+520 PRINT "PAYLOAD RECEIVE ticks: ";PEEK_L(l+120);"; seconds: ";PEEK_L(l+120)/50
+530 PRINT "CACHE COPY ticks: ";PEEK_L(l+124);"; seconds: ";PEEK_L(l+124)/50
+540 PRINT "Accounted phase seconds: ";total/50
+550 PRINT "Wall minus phases (approx): ";elapsed-total/50
+560 PRINT "Refills: ";PEEK_L(l+128)
+570 PRINT "Payload bytes received: ";PEEK_L(l+132)
+580 PRINT "Bytes copied to caller: ";PEEK_L(l+136)
+590 PRINT "Payload receive calls: ";PEEK_L(l+140)
+600 PRINT "Empty receive calls: ";PEEK_L(l+144)
+610 PRINT "Copied segments: ";PEEK_L(l+148)
+620 PRINT "Ticks are 1/50 second; profiling adds overhead"

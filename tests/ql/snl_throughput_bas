@@ -1,0 +1,52 @@
+10 REMark SMSQ/E bulk filesystem benchmark; same program for SNL and WIN
+20 REMark Uses 256 KiB and five operations per timed batch
+30 INPUT "NEW test filename (e.g. snl6_bench_bin): ";f$
+40 n=262144: reps=5
+50 p=ALCHP(n+32)
+60 IF p=0 THEN PRINT "Not enough memory": STOP
+70 b=p+16
+80 FOR i=0 TO 15: POKE p+i,165: POKE b+n+i,165
+90 PRINT "Preparing byte pattern (not timed)..."
+100 block$=""
+110 FOR i=0 TO 255: block$=block$&CHR$(i)
+120 FOR i=0 TO n-256 STEP 256: POKE$ b+i,block$
+130 PRINT "Creating ";f$;" (not timed; must not already exist)"
+140 SBYTES f$,b,n
+150 PRINT "Timing ";reps;" binary overwrite saves..."
+160 t=DATE
+170 FOR r=1 TO reps: SBYTES_O f$,b,n
+180 ws=DATE-t
+190 PRINT "Clearing payload (not timed)..."
+200 block$=FILL$(CHR$(90),256)
+210 FOR i=0 TO n-256 STEP 256: POKE$ b+i,block$
+220 PRINT "Timing ";reps;" binary loads..."
+230 t=DATE
+240 FOR r=1 TO reps: LBYTES f$,b
+250 rs=DATE-t
+260 PRINT "Checking final loaded data (not timed)..."
+270 FOR i=0 TO n-1
+280   want=i-256*INT(i/256)
+290   IF PEEK(b+i)<>want THEN
+300     PRINT "FAIL: data mismatch at offset ";i
+310     RECHP p
+320     STOP
+330   END IF
+340 END FOR i
+350 FOR i=0 TO 15
+360   IF PEEK(p+i)<>165 OR PEEK(b+n+i)<>165 THEN
+370     PRINT "FAIL: memory guard changed at offset ";i
+380     RECHP p
+390     STOP
+400   END IF
+410 END FOR i
+420 RECHP p
+430 PRINT "PASS: final payload and memory guards verified"
+440 PRINT "Bytes per operation: ";n;"; operations per batch: ";reps
+450 PRINT "WRITE (overwrite) seconds: ";ws
+460 IF ws>0 THEN PRINT "WRITE KiB/s: ";n*reps/1024/ws
+470 IF ws<=0 THEN PRINT "WRITE too fast for clock; increase reps"
+480 PRINT "READ seconds: ";rs
+490 IF rs>0 THEN PRINT "READ KiB/s: ";n*reps/1024/rs
+500 IF rs<=0 THEN PRINT "READ too fast for clock; increase reps"
+510 PRINT "Whole-second timer: approximate; repeat short measurements"
+520 PRINT "Test file retained: ";f$
