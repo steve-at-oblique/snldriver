@@ -1,5 +1,8 @@
 # V2.22 candidate: bulk read-cache copy
 
+Historical development notes: references below to `bin/snl_bin` describe the
+old V2.15 distribution. The current release binary is `bin/snldriver228_bin`.
+
 V2.21 passed the QIMSI Gold/SMSQ/E binary benchmark in Large QL Mode 4:
 five 256 KiB overwrites took 11 seconds (116.36 KiB/s), while five loads took
 23 seconds (55.65 KiB/s). Those are the comparison figures for this change.

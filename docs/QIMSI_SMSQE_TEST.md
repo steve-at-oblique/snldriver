@@ -1,7 +1,10 @@
 # V2.20 candidate: SMSQ/E on QIMSI Gold
 
+Historical development notes: references below to `bin/snl_bin` describe the
+old V2.15 distribution. The current release binary is `bin/snldriver228_bin`.
+
 The results below describe V2.20. The current development source is the
-[V2.24 batched READ-header candidate](BULK_READ_HEADERS.md); use that guide for the current
+[V2.27 uninstrumented 512-byte build](PERFORMANCE_BUILD.md); use that guide for the current
 candidate filename, expected banner and regression steps.
 
 This source candidate adds automatic selection of the QIMSI Gold USB SER2

@@ -1,11 +1,15 @@
 # Documentation
 
-Start with the [project README](../README.md) for the distributed V2.15 binary,
-V2.24 development source and tested operations. Run commands from the repo root unless a
+Start with the [project README](../README.md) for the V2.28 release binary,
+matching source and tested operations. Run commands from the repo root unless a
 guide explicitly says otherwise.
 
 ## Practical guides
 
+- [1024-byte READ experiment](READ_BLOCK_1024.md): historical V2.26 changes
+  and results; V2.27 restores the 512-byte driver cache and daemon limit.
+- [Uninstrumented performance build](PERFORMANCE_BUILD.md): V2.25 removes
+  profiling; V2.24 is preserved in diagnostic checkpoint `13a347e`.
 - [Batched READ headers](BULK_READ_HEADERS.md): V2.24 request/reply header
   batching and comparison with the V2.23 profiling baseline.
 - [Read-phase profiler](READ_PROFILE.md): V2.23 diagnostic build and a

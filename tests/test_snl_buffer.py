@@ -70,6 +70,8 @@ class CacheCPU:
         self.rom_calls = []
         self.read_header_batches = []
         self.read_header_calls = []
+        self.queued_tx = bytearray()
+        self.defer_tx = False
         self.tx_limit = 512
         self.tx_batches = []
         self.tx_calls = []
@@ -213,6 +215,9 @@ class CacheCPU:
             return  # diagnostics preserve caller registers
         if name == "snl_kick":
             self.kicks += 1
+            if self.queued_tx:
+                self.transmit(self.queued_tx[:1])
+                del self.queued_tx[:1]
             return
         def receive(n):
             if len(self.reply) < n:
@@ -292,7 +297,11 @@ class CacheCPU:
         # An invalid count may be injected without reading outside the request.
         copied = max(0, min(actual, requested))
         if copied:
-            self.transmit(bytes(self.mem[address:address + copied]))
+            data = bytes(self.mem[address:address + copied])
+            if self.defer_tx:
+                self.queued_tx.extend(data)
+            else:
+                self.transmit(data)
         self.reg["a1"] += copied
         for reg in self.register_list("d2-d7/a0/a2-a6"):
             self.reg[reg] = 0xDEADBEEF
@@ -533,6 +542,17 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.rom_calls, [512])
         self.assertEqual(cpu.field("snl_rx", width=2), 515)
 
+    def test_legacy_read_services_queued_request_while_waiting_for_header(self):
+        payload = bytes(range(256)) * 5
+        cpu = self.cpu(payload)
+        cpu.defer_tx = True  # IO.SSTRG queues bytes; each ROM service sends one
+        cpu.field("snl_txp", 0x1234)
+        self.assertEqual(cpu.transfer(len(payload)), (0, payload))
+        self.assertEqual(cpu.read_lengths, [512, 512, 512])
+        self.assertFalse(cpu.queued_tx)
+        self.assertGreater(len(cpu.read_header_calls), 3)
+        self.assertEqual(cpu.field("snl_dead", width=1), 0)
+
     def test_partial_bulk_read_request_is_not_replayed(self):
         cpu = self.cpu(b"abcdef")
         cpu.tx_batches = [(2, -1), (0, -1), (5, 0)]
@@ -629,77 +649,6 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.transfer(512), (0, payload))
         self.assertLess(cpu.steps, 512)
         self.assertEqual(cpu.read_lengths, [512])  # no additional serial request
-
-    def enable_profile(self, cpu):
-        cpu.reg["a6"] = 0x1800
-        cpu.mem[0xA064] = 1
-        cpu.mem[0xA066:0xA068] = b"\xff\xff"
-
-    def profile_long(self, cpu, offset):
-        return int.from_bytes(cpu.mem[0xA000 + offset:0xA004 + offset], "big")
-
-    def test_profile_phase_timing_wrap_and_register_preservation(self):
-        cpu = self.cpu(b"abc")
-        self.enable_profile(cpu)
-        for hook, tick, count in (("pf_req", 65530, 999), ("pf_head", 2, 999),
-                                  ("pf_data", 7, 999), ("pf_stop", 12, 512),
-                                  ("pf_copy", 14, 999), ("pf_stop", 16, 512)):
-            cpu.mem[0x1830:0x1832] = tick.to_bytes(2, "big")
-            cpu.reg.update(d0=0xFFFFFFFA, d1=count, d2=123)
-            saved = {r: cpu.reg[r] for r in cpu.register_list("d0-d7/a0-a6")}
-            cpu.run(hook)
-            self.assertEqual({r: cpu.reg[r] for r in saved}, saved)
-        self.assertEqual([self.profile_long(cpu, i) for i in (0x70, 0x74, 0x78, 0x7C)],
-                         [8, 5, 5, 2])
-        self.assertEqual(self.profile_long(cpu, 0x80), 1)
-        self.assertEqual(self.profile_long(cpu, 0x84), 512)
-        self.assertEqual(self.profile_long(cpu, 0x88), 512)
-        self.assertEqual(self.profile_long(cpu, 0x94), 1)
-        self.assertEqual(cpu.mem[0xA066:0xA068], b"\xff\xff")
-
-    def test_profile_bulk_counters_match_payload_and_refills(self):
-        payload = bytes(range(256)) * 6 + b"Z"
-        cpu = self.cpu(payload)
-        self.enable_profile(cpu)
-        cpu.rom_limit = 100  # exercise fragmented serial acceptance
-        self.assertEqual(cpu.transfer(len(payload)), (0, payload))
-        self.assertEqual(self.profile_long(cpu, 0x80), 4)
-        self.assertEqual(self.profile_long(cpu, 0x84), len(payload))
-        self.assertEqual(self.profile_long(cpu, 0x88), len(payload))
-        self.assertEqual(self.profile_long(cpu, 0x8C), len(cpu.rom_calls))
-        self.assertEqual(self.profile_long(cpu, 0x90), 0)
-        self.assertEqual(self.profile_long(cpu, 0x94), 4)
-        self.assertEqual(cpu.mem[0xA066:0xA068], b"\xff\xff")
-        self.assertEqual(cpu.transfer(1), (-10, b""))
-        self.assertEqual(self.profile_long(cpu, 0x80), 4)
-
-    def test_profile_counts_empty_polls_but_not_header_receive_calls(self):
-        cpu = self.cpu(b"abcdef")
-        self.enable_profile(cpu)
-        cpu.rom_batches = [(0, -1), (6, 0)]
-        self.assertEqual(cpu.transfer(6), (0, b"abcdef"))
-        self.assertEqual(self.profile_long(cpu, 0x8C), 2)
-        self.assertEqual(self.profile_long(cpu, 0x90), 1)
-        cpu.reg.update(d2=14, a1=0x10000)
-        self.assertEqual(cpu.run("io_headr")[0], 0)
-        self.assertEqual(self.profile_long(cpu, 0x8C), 2)
-        self.assertEqual(self.profile_long(cpu, 0x90), 1)
-
-    def test_profile_error_records_partial_receive_then_returns_idle(self):
-        cpu = self.cpu(b"abcdef")
-        self.enable_profile(cpu)
-        cpu.rom_batches = [(2, -6)]
-        self.assertEqual(cpu.transfer(6), (-6, b""))
-        self.assertEqual(self.profile_long(cpu, 0x84), 2)
-        self.assertEqual(self.profile_long(cpu, 0x88), 0)
-        self.assertEqual(self.profile_long(cpu, 0x94), 0)
-        self.assertEqual(cpu.mem[0xA066:0xA068], b"\xff\xff")
-
-    def test_disabled_profile_does_not_mutate_stats(self):
-        cpu = self.cpu(b"abc")
-        before = bytes(cpu.mem[0xA064:0xA0A0])
-        self.assertEqual(cpu.transfer(3), (0, b"abc"))
-        self.assertEqual(bytes(cpu.mem[0xA064:0xA0A0]), before)
 
     def test_line_crosses_block_boundary(self):
         payload = b"a" * 511 + b"bc\nnext\n"

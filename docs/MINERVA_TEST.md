@@ -1,5 +1,8 @@
 # V2.19 serial compatibility candidate
 
+Historical development notes: references below to `bin/snl_bin` describe the
+old V2.15 distribution. The current release binary is `bin/snldriver228_bin`.
+
 The source is a test candidate. The distributed `bin/snl_bin` remains the
 tested V2.15 binary. Assemble `SNLdriver_asm` with the Talent/Quanta assembler
 and save a separate candidate binary; do not replace the release binary yet.

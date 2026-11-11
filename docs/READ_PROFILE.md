@@ -1,5 +1,10 @@
 # V2.23 diagnostic build: read-phase profiling
 
+Historical guide for V2.23/V2.24. The diagnostic implementation is preserved
+in local commit `13a347e`; current V2.25 source removes the instrumentation
+and SNLP interface. Use [the performance-build guide](PERFORMANCE_BUILD.md)
+for the current source and ordinary benchmark.
+
 This is an instrumented V2.22, not a speed optimization. Keep the working
 V2.22 binary. Request size, wire protocol, daemon and cache behavior remain
 unchanged. Profiling is off until explicitly enabled by the BASIC runner.

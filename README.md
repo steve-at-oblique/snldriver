@@ -1,23 +1,26 @@
-# SNL — serial filesystem for the Sinclair QL (Saturday Night Live driver!)
+# SNL — serial filesystem for the Sinclair QL
 
-SNL lets a Sinclair QL load, save and run files stored in Linux directories,
-using SER2 and a Python daemon. The checked-in binary is V2.15, assembled with
-Talent/Quanta Assembler 2.02 and tested on stock physical QL hardware (US
-version with ROM JSU).
+SNL is a Linux-backed file storage driver for the Sinclair QL. It lets your QL
+use a Linux computer as external file storage over a serial or USB serial
+connection. Load, save and run files directly from Linux directories using
+familiar QL commands. SNL uses SER2 on the QL and a Python daemon on Linux.
 
-The development assembly source is now a **V2.24 batched READ-header candidate**
-for SMSQ/E on QIMSI Gold, with hardware test results through V2.24. The
-distributed binary has not been replaced. See the
-[QIMSI hardware test guide](docs/QIMSI_SMSQE_TEST.md) for building a separate
-candidate and [READ-header guide](docs/BULK_READ_HEADERS.md) for V2.24 testing
-with the existing read profiler.
+The release binary is [snldriver228_bin](bin/snldriver228_bin), assembled with
+Talent/Quanta Assembler 2.02 from `SNLdriver_asm` (V2.28). Functional regression
+tests passed on a stock 128K QL running QDOS and on QIMSI Gold USB running
+SMSQ/E. Assembly on both systems produced identical binaries. Minerva remains
+unverified for this release.
 
-QIMSI Gold testing confirmed BASIC load/save/overwrite, binary round trips,
-directory operations, executable loading and daemon recovery. Large QL Mode 4
-benchmarks reached 116.36 KiB/s writing with V2.21 and 80 KiB/s reading with
-V2.22; the V2.24 instrumented read run passed at 83.93 KiB/s. See the linked
-guides for test scope, display modes, timing limits and known limitations.
-Original QL/Minerva regression testing of the combined source remains pending.
+V2.28 includes bulk transfers, aligned read-cache copies and batched READ
+headers, with 512-byte payloads and no profiling instrumentation. It also fixes
+the stock QL timeout caused by queued READ request bytes needing ROM serial
+servicing while waiting for a reply. The 1024-byte buffer experiment was
+reverted after it showed no measured benefit.
+
+QIMSI Gold USB throughput testing in Large QL Mode 4 passed at **116.36 KiB/s
+writing** and **85.33 KiB/s reading**. See the
+[performance guide](docs/PERFORMANCE_BUILD.md) and
+[QIMSI test history](docs/QIMSI_SMSQE_TEST.md) for test details.
 
 Verified operations include BASIC LOAD/SAVE, binary LBYTES/SBYTES, executable
 loading, DIR, DELETE, and the QL Monitor/assembler and Toolkit II overwrite
@@ -26,6 +29,7 @@ workflows. The QL can assemble SNL itself and save its new binary through SNL.
 ## Repository layout
 
 ```text
+bin/              Release binary (snldriver228_bin)
 SNLdriver_asm      Self-contained QL assembly source
 snl_serial         Linux serial filesystem daemon
 snl_config.json    Shareable configuration with relative drive paths
@@ -43,10 +47,31 @@ at a time. Retained reference sources are not build inputs.
 
 ## Linux setup
 
-Install Python 3 and pyserial, then run these commands from the repository root:
+Install Python 3 and pyserial. From the repository root, choose the included
+configuration for your interface and copy it over `snl_config.json`:
+
+| Connection | Linux device | Configuration | RTS/CTS |
+| --- | --- | --- | --- |
+| Stock QL SER2 through a USB-to-serial adapter | `/dev/ttyUSB0` | `snl_configUSB0.json` | Enabled |
+| QIMSI Gold USB serial (QL SER2 under SMSQ/E) | `/dev/ttyACM0` | `snl_configACM0.json` | Disabled |
+
+For a stock QL with a USB-to-serial adapter:
 
 ```sh
-mkdir -p drive1 drive2 drive3
+cp snl_configUSB0.json snl_config.json
+```
+
+For QIMSI Gold USB:
+
+```sh
+cp snl_configACM0.json snl_config.json
+```
+
+Both example configurations map `snl1_` through `snl6_` to `drive1` through
+`drive6`. Create those directories and start the daemon:
+
+```sh
+mkdir -p drive1 drive2 drive3 drive4 drive5 drive6
 python3 snl_serial
 ```
 
@@ -55,17 +80,22 @@ Relative drive paths are resolved from the directory where you start the
 daemon. The checked-in configuration contains relative paths and is intended
 to be shared. A leading `~` is not expanded automatically.
 
-The tested physical connection uses 9600 baud, eight data bits, no parity,
-two stop bits, and RTS/CTS hardware flow control. Match the existing tested
-QL cable wiring, including the handshake lines. The daemon reserves its host
-serial device; stop it before using the same device for bootstrapping.
+For the stock QL's physical serial connection, use 9600 baud, eight data bits,
+no parity, two stop bits, and RTS/CTS hardware flow control. Match the tested
+QL cable wiring, including the handshake lines. QIMSI USB uses RTS/CTS off;
+the example retains the baud and stop-bit settings, but these do not set its
+USB transfer speed. Linux device numbers can vary, so adjust `serial_port`
+if your interface appears under a different name.
 
-Stock QDOS accepts drive numbers 1 through 8. A configured drive0 cannot be
-accessed as `snl0_` on the stock ROM. Restart the daemon after config changes.
+The daemon reserves its host serial device; stop it before switching
+configurations or using the same device for bootstrapping.
+
+Restart the daemon after config changes.
 
 ## QL installation and use
 
-Assemble `SNLdriver_asm` with Talent/Quanta 2.02 and save the raw binary.
+Use `bin/snldriver228_bin`, or assemble `SNLdriver_asm` with Talent/Quanta 2.02
+and save the raw binary.
 Load it into reserved memory and install it with CALL, not EXEC. See the
 [binary serial bootstrap guide](docs/BINARY_BOOTSTRAP.md) for a direct LBYTES
 transfer using `python3 tools/qltransfer_bin your_binary` on Linux. Allocate
@@ -123,12 +153,16 @@ From the repository root:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -q
 ```
 
-The 120 tests cover the daemon and an interpreter of the actual assembly source,
-including transport errors, register/stack handling, alignment and profiling.
-They do not replace Talent assembly or physical serial testing. The V2.24
-source has been assembled and its diagnostic read test passed on QIMSI Gold;
-the earlier source-format cleanup was also byte-compared with its preceding
-build.
+The 116 tests cover the daemon and an interpreter of the actual assembly source,
+including transport errors, register/stack handling and alignment. The five
+profiling-specific tests are retained with V2.24 in the diagnostic checkpoint.
+They do not replace Talent assembly or physical serial testing. V2.28 has been
+assembled and tested on the stock 128K QL and QIMSI Gold USB under SMSQ/E;
+both assemblies produced identical binaries. Hardware coverage includes BASIC
+load/save, existing-file handling, binary integrity and memory guards,
+directories and prefix filtering, empty directories, missing files, executable
+loading and assembling the driver through SNL. Stock QL testing also confirmed
+recovery after starting a missing daemon. Minerva is unverified for V2.28.
 
 Start with the [documentation index](docs/README.md) for hardware tests,
 bootstrap instructions, protocol details and historical development notes.

@@ -1,5 +1,8 @@
 # V2.21 candidate: bulk serial writes
 
+Historical development notes: references below to `bin/snl_bin` describe the
+old V2.15 distribution. The current release binary is `bin/snldriver228_bin`.
+
 V2.20 passed the first QIMSI Gold/SMSQ/E hardware tests. The write baseline
 was 10.49 KiB/s in Large QL Mode 4 and 6.77 KiB/s in Large 16-bit mode.
 Reads measured 58.18 and 37.65 KiB/s respectively. See

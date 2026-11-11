@@ -133,3 +133,19 @@ batch: writes remained 11 seconds (116.3636 KiB/s), while reads took 16 seconds
 (80 KiB/s), about 44% faster than V2.21's 23-second read batch. V2.23 adds
 optional phase profiling to this V2.22 path; its results must be identified
 as instrumented measurements rather than another optimization benchmark.
+
+## V2.25 uninstrumented result
+
+User-reported PASS on SNL6, Large QL Mode 4, after `CLS #1`: five 256 KiB
+operations per batch (consistent with rates), write 11 seconds / 116.3636
+KiB/s, read 15 seconds / 85.3333 KiB/s. This is the first hardware result
+with profiling calls and the diagnostic interface removed. See
+[the performance-build record](PERFORMANCE_BUILD.md) for timing qualifications.
+
+## V2.28 release regression
+
+User-reported throughput PASS on QIMSI Gold USB under SMSQ/E, in Large QL
+Mode 4: write 116.3636 KiB/s, read 85.33 KiB/s. Performance matches the
+V2.25 uninstrumented baseline after restoring legacy serial servicing for
+stock QDOS. Functional regression tests also passed on the stock 128K QL;
+no stock QL throughput figure was reported for this release.

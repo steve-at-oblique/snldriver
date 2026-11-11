@@ -2,7 +2,36 @@
 ; SNL serial filesystem driver
 ; ============================================================================
 ;
-; Version       : 2.24 (batched READ headers)
+; SPDX-License-Identifier: BSD-2-Clause
+; BSD 2-Clause License
+;
+; Copyright 2026 Steve Jennen
+;
+; Redistribution and use in source and binary forms, with or without
+; modification, are permitted provided that the following conditions are met:
+;
+; 1. Redistributions of source code must retain the above copyright notice, this
+;    list of conditions and the following disclaimer.
+;
+; 2. Redistributions in binary form must reproduce the above copyright notice,
+;    this list of conditions and the following disclaimer in the documentation
+;    and/or other materials provided with the distribution.
+;
+; THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+; IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+; DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+; OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+; OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+;
+; Applies to Steve Jennen's original contributions. Existing third-party
+; copyright and redistribution notices are retained at the end of this file.
+;
+; Version       : 2.28 (legacy serial service during bulk receive)
 ; Wire protocol : SNL v2, with readiness handshake and directory support
 ; Target        : Sinclair QL / Motorola 68000 instruction set
 ; Assembler     : Talent/Quanta Assembler 2.02
@@ -114,13 +143,7 @@ sv_fslst equ      $140                      ; pointer to list of file channel de
 ; Entry point and installation banner
 ; ----------------------------------------------------------------------------
 
-; Diagnostic header: fixed 4-byte branch, SNLP magic, runtime linkage pointer.
-; Entry remains offset zero; BASIC reads the pointer at load address + 8.
-         dc.w     $6000                    ; BRA with 16-bit displacement (4 bytes)
-         dc.w     boot-*                   ; displacement relative to this extension word
-prf_mark dc.l     $534E4C50                 ; SNLP at load address + 4
-prf_link dc.l     0                         ; installed linkage at load address + 8
-boot     bsr      init
+         bsr      init
          tst.l    d0
          bne      boot_err
          movem.l  d0-d3/a0-a3,-(a7)
@@ -135,8 +158,9 @@ boot_err bsr      dbg_boot
          tst.l    d0
          rts
 
-banner   dc.w     37                        ; text bytes only; exclude Talent alignment padding
-         dc.b     'SNL Device driver V2.24 serial debug',10
+banner   dc.w     67                        ; text bytes only; exclude Talent alignment padding
+         dc.b     'SNL Device driver V2.28 - BSD-2-Clause',10
+         dc.b     'Copyright 2026 Steve Jennen',10
 ban_end  equ      *
          dc.b     0                         ; word alignment
 
@@ -181,7 +205,7 @@ init     movem.l  d1-d3/a0-a4,-(a7)
          tst.l    d0
          bne      ini_ret
          move.l   a0,a1
-         moveq    #39,d1                    ; clear through $9F, including profile data
+         moveq    #24,d1                    ; clear through $63, including transport flags
 ini_clr  clr.l    (a1)+
          dbra     d1,ini_clr
          lea      dd_mdvio,a1
@@ -323,10 +347,7 @@ ini_link moveq    #$13,d0                   ; installation epoch for readiness t
          moveq    #$22,d0                   ; MT.LDD
          trap     #1
          tst.l    d0
-         bne      ini_drop
-         lea      prf_link,a1
-         move.l   a4,(a1)                   ; publish only after successful registration
-         bra      ini_ret
+         beq      ini_ret
 ini_drop move.l   d0,-(a7)
          move.l   $4C(a4),a0
          moveq    #io.close,d0
@@ -820,7 +841,6 @@ r_have   move.l   snl_buf(a5),a4
          adda.l   d2,a4
          cmpi.l   #2,d7
          beq      r_line                    ; line reads must stop immediately after LF
-         bsr      pf_copy
 
 ; Copy min(cache remainder, caller remainder). Update logical state once
 ; per segment rather than once per byte. 68000 words/longs need even
@@ -858,8 +878,7 @@ r_bytes  move.w   d6,d2
          subq.w   #1,d2
 r_bcopy  move.b   (a4)+,(a1)+
          dbra     d2,r_bcopy
-r_cdone  bsr      pf_stop
-         add.l    d1,fs_nblok(a5)
+r_cdone  add.l    d1,fs_nblok(a5)
          add.l    d1,d4
          sub.l    d1,d5
          bra      r_next
@@ -895,7 +914,6 @@ r_ret    move.l   d4,d1
 
 snl_fill movem.l  d2-d7/a1-a4,-(a7)
          suba.w   #8,a7                     ; aligned request/reply scratch
-         bsr      pf_req
          clr.w    snl_len(a5)
          clr.w    snl_err(a5)
          move.l   fs_nblok(a5),d1
@@ -913,7 +931,6 @@ snl_fill movem.l  d2-d7/a1-a4,-(a7)
          bsr      snl_bput
          bne      cf_ret
          move.b   #2,snl_phas(a5)
-         bsr      pf_head
          move.l   a7,a1
          moveq    #3,d2
          bsr      snl_bget                  ; status byte and count word in one receive
@@ -949,7 +966,6 @@ cf_data  tst.l    d5
          move.l   snl_buf(a5),a1
          move.l   d5,d2
          move.b   #4,snl_phas(a5)
-         bsr      pf_data
          bsr      snl_bget
          bne      cf_ret
          move.w   d4,snl_err(a5)
@@ -960,94 +976,19 @@ cf_empty move.w   d4,snl_err(a5)
 cf_fail  move.l   d4,d0
          bra      cf_ret
 cf_bad   bsr      snl_bad
-cf_ret   bsr      pf_stop
-         adda.w   #8,a7
+cf_ret   adda.w   #8,a7
          movem.l  (a7)+,d2-d7/a1-a4
          tst.l    d0
-         rts
-
-; ----------------------------------------------------------------------------
-; Optional read profiling (SMSQ/E QIMSI only, enabled explicitly by BASIC)
-; ----------------------------------------------------------------------------
-
-; Linkage: $64 enable byte; $66 phase offset (0/4/8/12 or -1 idle);
-; $68 last polling tick (sys_pict, modulo 65536 at 50 Hz).
-; $70..$7F accumulated ticks: request, reply header, payload, cache copy.
-; $80 refills; $84 received payload bytes; $88 copied bytes;
-; $8C bulk receive calls; $90 empty receive calls; $94 copied segments.
-; Clear/reset only while no SNL file operation is active.
-; Preserve all registers; flags are scratch at these instrumentation sites.
-
-pf_req   movem.l  d0-d2/a2,-(a7)
-         moveq    #0,d2
-         bra      pf_phase
-pf_head  movem.l  d0-d2/a2,-(a7)
-         moveq    #4,d2
-         bra      pf_phase
-pf_data  movem.l  d0-d2/a2,-(a7)
-         moveq    #8,d2
-         bra      pf_phase
-pf_copy  movem.l  d0-d2/a2,-(a7)
-         moveq    #12,d2
-         bra      pf_phase
-pf_stop  movem.l  d0-d2/a2,-(a7)
-         moveq    #-1,d2
-pf_phase move.l   ch_drivr(a5),a2
-         lea      -$18(a2),a2
-         tst.b    $64(a2)
-         beq      pf_exit
-         moveq    #0,d0
-         move.w   $30(a6),d0                ; 50 Hz polling counter, no nested trap
-         sub.w    $68(a2),d0
-         andi.l   #$FFFF,d0                 ; modulo wrap for short phase intervals
-         moveq    #0,d1
-         move.w   $66(a2),d1
-         cmpi.w   #-1,d1
-         beq      pf_set
-         adda.w   d1,a2
-         add.l    d0,$70(a2)
-         suba.w   d1,a2
-         cmpi.w   #-1,d2                    ; count bytes only at phase end
-         bne      pf_set
-         move.l   4(a7),d0                  ; original D1: received/copied byte count
-         cmpi.w   #8,d1
-         bne      pf_cbyte
-         add.l    d0,$84(a2)
-         bra      pf_set
-pf_cbyte cmpi.w   #12,d1
-         bne      pf_set
-         add.l    d0,$88(a2)
-pf_set   move.w   d2,$66(a2)
-         move.w   $30(a6),$68(a2)
-         tst.w    d2
-         bne      pf_cseg
-         addq.l   #1,$80(a2)
-pf_cseg  cmpi.w   #12,d2
-         bne      pf_exit
-         addq.l   #1,$94(a2)
-pf_exit  movem.l  (a7)+,d0-d2/a2
-         rts
-pf_poll  movem.l  d0/a2,-(a7)
-         move.l   ch_drivr(a5),a2
-         lea      -$18(a2),a2
-         tst.b    $64(a2)
-         beq      pp_exit
-         cmpi.w   #8,$66(a2)
-         bne      pp_exit
-         addq.l   #1,$8C(a2)
-         tst.l    d1
-         bne      pp_exit
-         addq.l   #1,$90(a2)
-pp_exit  movem.l  (a7)+,d0/a2
          rts
 
 ; ----------------------------------------------------------------------------
 ; Bulk serial receive
 ; ----------------------------------------------------------------------------
 
-; Receive D2.W bytes at A1 using ROM IO.FSTRG. Called only after the
-; request has reached Linux and the reply status/count have been read:
-; no TX kick is needed while draining payload. The ROM may return a
+; Receive D2.W bytes at A1 using ROM IO.FSTRG, for headers and payload.
+; Legacy QDOS may still have request bytes queued: service its validated
+; serial task while waiting. USB has no callback and skips this work.
+; The ROM may return a
 ; partial batch with ERR.NC; retry only the remainder, D1 initially zero.
 ; Return D0=status, D1=total received, A1 advanced by that count.
 ; Preserve D2-D7/A0/A2-A6. Timeout is 3 seconds without progress, with
@@ -1065,7 +1006,10 @@ snl_bget movem.l  d2-d7/a0/a2-a6,-(a7)
          trap     #1
          move.l   d1,d6
          move.l   #262143,d7
-bg_again movem.l  d4-d7/a2-a6,-(a7)
+bg_again tst.l    snl_txp(a5)               ; queued request may still need sending
+         beq      bg_fetch
+         bsr      snl_kick
+bg_fetch movem.l  d4-d7/a2-a6,-(a7)
          move.l   snl_serp(a5),a0
          move.l   ch_drivr(a0),a4
          lea      -$18(a4),a3
@@ -1079,7 +1023,6 @@ bg_again movem.l  d4-d7/a2-a6,-(a7)
          jsr      (a4)
          movem.l  (a7)+,d4-d7/a2-a6
          move.w   d0,snl_last(a5)
-         bsr      pf_poll
          move.l   d4,d2
          sub.l    d5,d2
          cmp.l    d2,d1

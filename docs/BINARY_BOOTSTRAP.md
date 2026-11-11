@@ -5,23 +5,23 @@ LBYTES protocol. The existing `tools/qltransfer` text sender remains available;
 the old base64 loaders are retained as fixtures/reference material. The binary
 bootstrap has been used on physical QL hardware during this project.
 
-For the approximately 3.5 KB SNL driver, stop the daemon and reset the QL,
+For the 4,254-byte V2.28 SNL driver, stop the daemon and reset the QL,
 then type on the QL:
 
 ```text
 BAUD 9600
-base=RESPR(4096)
+base=RESPR(8192)
 LBYTES ser2h,base
 ```
 
-The 4096-byte allocation is sufficient only if the actual binary is no larger
+The 8192-byte allocation is sufficient only if the actual binary is no larger
 than that; increase it for larger builds. LBYTES uses its first 14 destination
 bytes as temporary header storage, so allocations must also be at least 14.
 
 While the QL is waiting in LBYTES, run on Linux:
 
 ```sh
-python3 tools/qltransfer_bin snl_bin
+python3 tools/qltransfer_bin bin/snldriver228_bin
 ```
 
 Use the filename of the driver binary you actually want to install. When the
