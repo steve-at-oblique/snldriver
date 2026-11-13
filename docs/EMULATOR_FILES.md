@@ -43,7 +43,9 @@ Reading does not modify the file or create a sidecar. Updating an existing
 wrapped file preserves its wrapper; setting its QDOS header updates the
 wrapper's metadata in place. The extra 14 bytes of a 44-byte wrapper are
 preserved, not interpreted as QDOS metadata. Overwriting a file through SNL
-creates a plain file and resets metadata, as before.
+creates a plain file and resets metadata, as before. In V2.29, modifying a
+wrapped file also creates a marked sidecar for its dates/version; the wrapper
+continues to supply its embedded type/data-space attributes.
 
 New files created by SNL still use plain payloads plus `.snl_headers` metadata.
 This change enables sQLux-extracted files to be used by SNL; it does not teach
@@ -73,3 +75,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -q
 Tests cover both wrapper lengths, payload offsets and EOF, read-only access,
 metadata updates, writable payload extension, stale sidecars, overwrite,
 malformed wrappers, and the QL assembly's buffered read path.
+
+V2.29 candidate: dates/version for wrapped files are stored in a
+`.snl_headers` sidecar marked `wrapper_metadata: true`. Embedded wrapper
+attributes remain authoritative; see [metadata tests](METADATA_TEST.md).

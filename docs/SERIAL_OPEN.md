@@ -508,3 +508,9 @@ Hardware check
 No performance number is claimed before hardware timing. This removes
 per-character protocol round trips; ROM byte handling and the existing
 serial polling overhead still apply.
+
+## V2.29 metadata candidate
+
+The current source adds FILE DATE ($19), FILE VERSION ($1C), and EXTENDED
+INFO ($1D). See [metadata protocol and hardware tests](METADATA_TEST.md) for
+request/reply layouts, date/version semantics and daemon compatibility.

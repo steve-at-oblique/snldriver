@@ -1,0 +1,21 @@
+10 REMark SNL V2.29 metadata test: SMSQ/E or suitable Toolkit extensions
+20 REMark Change f$ to a NEW disposable filename before each RUN
+30 f$="snl1_meta229_test"
+40 OPEN_NEW #3,f$
+50 PRINT #3,"SNL metadata test"
+60 CLOSE #3
+70 OPEN #3,f$
+80 PRINT "Host update date: ";DATE$(FUPDT(#3))
+90 PRINT "Initial version (expect 1): ";FVERS(#3)
+100 SET_FVERS #3,42
+110 SET_FUPDT #3,1700000000
+120 PRINT "Set version (expect 42): ";FVERS(#3)
+130 PRINT "Set date (expect 1700000000): ";FUPDT(#3)
+140 CLOSE #3
+150 OPEN_IN #3,f$
+160 PRINT "Reopened version (expect 42): ";FVERS(#3)
+170 PRINT "Reopened date (expect 1700000000): ";FUPDT(#3)
+180 CLOSE #3
+190 PRINT "Check directory and daemon EXTENDED INFO trace:"
+200 DIR snl1_
+210 PRINT "Metadata checks finished; now try the Unzip test"

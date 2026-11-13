@@ -5,8 +5,12 @@ use a Linux computer as external file storage over a serial or USB serial
 connection. Load, save and run files directly from Linux directories using
 familiar QL commands. SNL uses SER2 on the QL and a Python daemon on Linux.
 
+**Development candidate:** `SNLdriver_asm` is now V2.29 with file dates,
+versions and extended medium information. See the [hardware test plan](docs/METADATA_TEST.md).
+The supplied binary remains the tested V2.28 release.
+
 The release binary is [snldriver228_bin](bin/snldriver228_bin), assembled with
-Talent/Quanta Assembler 2.02 from `SNLdriver_asm` (V2.28). Functional regression
+Talent/Quanta Assembler 2.02 from the V2.28 source revision. Functional regression
 tests passed on a stock 128K QL running QDOS and on QIMSI Gold USB running
 SMSQ/E. Assembly on both systems produced identical binaries. Minerva remains
 unverified for this release.
@@ -94,8 +98,9 @@ Restart the daemon after config changes.
 
 ## QL installation and use
 
-Use `bin/snldriver228_bin`, or assemble `SNLdriver_asm` with Talent/Quanta 2.02
-and save the raw binary.
+Use `bin/snldriver228_bin` for the tested release. Assembling the current
+`SNLdriver_asm` with Talent/Quanta 2.02 produces the V2.29 candidate; save it
+as a separate raw binary and use the matching updated daemon.
 Load it into reserved memory and install it with CALL, not EXEC. See the
 [binary serial bootstrap guide](docs/BINARY_BOOTSTRAP.md) for a direct LBYTES
 transfer using `python3 tools/qltransfer_bin your_binary` on Linux. Allocate
@@ -137,7 +142,8 @@ been used on hardware; WCOPY failed during testing and remains unverified.
 - One open SNL channel across all drives; SNL-to-SNL copying is unsupported.
 - Flat drive directories; DIR can filter a filename prefix but cannot traverse
   subdirectories. Map a host subdirectory as another drive instead.
-- No format, rename, truncate, or extended filesystem calls.
+- No format, rename, truncate, or subdirectory creation. V2.29 adds dates,
+  versions and extended medium information; hardware validation is pending.
 - Stock DIR space counts are capped at 32767 sectors for display; this is not
   a storage quota.
 - Readiness handles missed daemon startup, not arbitrary interrupted binary
@@ -153,7 +159,7 @@ From the repository root:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -q
 ```
 
-The 116 tests cover the daemon and an interpreter of the actual assembly source,
+The automated tests cover the daemon and an interpreter of the actual assembly source,
 including transport errors, register/stack handling and alignment. The five
 profiling-specific tests are retained with V2.24 in the diagnostic checkpoint.
 They do not replace Talent assembly or physical serial testing. V2.28 has been

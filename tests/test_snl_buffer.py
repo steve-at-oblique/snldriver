@@ -168,9 +168,11 @@ class CacheCPU:
     def transmit(self, data):
         self.wire.extend(data)
         cmd = self.wire[0]
-        assert cmd in (0x11, 0x12, 0x13, 0x15, 0x18, ord("~")), self.wire.hex()
+        assert cmd in (0x11, 0x12, 0x13, 0x15, 0x18, 0x19, 0x1C, 0x1D, ord("~")), self.wire.hex()
         if cmd == ord("~"):
             count, length = 0, 22
+        elif cmd in (0x19, 0x1C, 0x1D):
+            count, length = 0, 6 if cmd == 0x19 else 5
         elif cmd == 0x11:
             if len(self.wire) < 4:
                 return
@@ -451,6 +453,56 @@ class BufferTests(unittest.TestCase):
         (self.root / "test_bas").write_bytes(payload)
         self.session.open(1, 0, b"test_bas")
         return CacheCPU(self.session)
+
+    def test_metadata_handlers_wire_and_pointer_preservation(self):
+        for entry, value, selector, cmd in (("io_vers", 42, 0, 0x1C),
+                                            ("io_date", 1800000000, 2, 0x19)):
+            with self.subTest(entry=entry):
+                cpu = self.cpu(b"abc")
+                cpu.reg.update(d1=value, d2=selector, a1=0x10001)
+                self.assertEqual(cpu.run(entry)[0], 0)
+                self.assertEqual(cpu.reg["d1"], value)
+                self.assertEqual(cpu.reg["a1"], 0x10001)
+                packet = bytes((cmd,)) + value.to_bytes(4, "big")
+                if entry == "io_date":
+                    packet += bytes((selector,))
+                self.assertEqual(cpu.requests, [packet])
+                self.assertFalse(cpu.reply)
+
+    def test_extended_info_preserves_pointers_and_memory_guards(self):
+        cpu = self.cpu(b"abc")
+        cpu.reg.update(d1=0, a1=0x10001)
+        cpu.mem[0x10000:0x10042] = b"Z" * 66
+        expected = self.session.extended_info(0)
+        self.assertEqual(cpu.run("io_xinf")[0], 0)
+        self.assertEqual(cpu.reg["a1"], 0x10001)
+        self.assertEqual(cpu.reg["d1"], 0)
+        self.assertEqual(cpu.mem[0x10000:0x10042], b"Z" + expected + b"Z")
+        self.assertFalse(cpu.reply)
+
+    def test_extended_info_short_response_does_not_publish_partial_data(self):
+        for length in (1, 12, 64):
+            with self.subTest(length=length):
+                cpu = self.cpu(b"abc")
+                cpu.truncate_reply = length
+                cpu.reg.update(d1=0, a1=0x10000)
+                cpu.mem[0x10000:0x10040] = b"Z" * 64
+                self.assertEqual(cpu.run("io_xinf")[0], -13)
+                self.assertEqual(cpu.reg["a1"], 0x10000)
+                self.assertEqual(cpu.reg["d1"], 0)
+                self.assertEqual(cpu.mem[0x10000:0x10040], b"Z" * 64)
+
+    def test_metadata_daemon_error_and_short_reply(self):
+        cpu = self.cpu(b"abc")
+        cpu.reg.update(d1=65536)
+        self.assertEqual(cpu.run("io_vers")[0], snl.BP)
+        self.assertEqual(cpu.reg["d1"], 65536)
+        self.assertFalse(cpu.reply)
+        cpu = self.cpu(b"abc")
+        cpu.truncate_reply = 3
+        cpu.reg.update(d1=0xFFFFFFFF)
+        self.assertEqual(cpu.run("io_date")[0], -13)
+        self.assertEqual(cpu.reg["a1"], 0x4000)
 
     def test_loader_character_reads_need_four_requests(self):
         payload = LOADER_FIXTURE.read_bytes()

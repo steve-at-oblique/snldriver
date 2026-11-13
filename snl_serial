@@ -1,4 +1,5 @@
 """SNL protocol v2 server. See docs/SERIAL_OPEN.md for the wire format."""
+import datetime
 import errno
 import io
 import json
@@ -101,6 +102,12 @@ def error_code(exc):
     return TE
 
 
+def qdos_now():
+    """Host local wall time as unsigned seconds since 1961 (no Linux mtime)."""
+    return max(0, min(0xFFFFFFFE, int((datetime.datetime.now()
+               - datetime.datetime(1961, 1, 1)).total_seconds())))
+
+
 class Session:
     """One file per connection; translate emulator wrappers to QDOS metadata."""
     def __init__(self, drives):
@@ -112,6 +119,9 @@ class Session:
         self.header = bytearray(64)
         self.payload_base = 0
         self.drive = None
+        self.modified = False
+        self.date_fixed = False
+        self.version_fixed = False
 
     def require_file(self, writing=False):
         if self.file is None:
@@ -123,7 +133,7 @@ class Session:
         return self.path.parent / ".snl_headers" / (self.path.name + ".json")
 
     def save_header(self):
-        self.require_file(writing=True)
+        self.require_file()
         dest = self.meta_path()
         dest.parent.mkdir(exist_ok=True)
         # Keep metadata inside the drive even if an administrator placed a symlink.
@@ -133,7 +143,7 @@ class Session:
         try:
             with tempfile.NamedTemporaryFile(mode="w", dir=dest.parent, delete=False) as out:
                 tmp = out.name
-                json.dump({"header": self.header.hex()}, out)
+                json.dump({"header": self.header.hex(), "wrapper_metadata": bool(self.payload_base)}, out)
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(tmp, dest)
@@ -206,13 +216,23 @@ class Session:
                     if base not in (30, 44) or size < base:
                         raise QDOSError(BN)
                     header[4:14] = prefix[20:30]
-                elif meta.exists():
+                if meta.exists():
                     if meta.is_symlink():
                         raise QDOSError(BN)
-                    raw = bytes.fromhex(json.loads(meta.read_text())["header"])
-                    if len(raw) != 64:
-                        raise QDOSError(BN)
-                    header[:] = raw
+                    try:
+                        saved = json.loads(meta.read_text())
+                    except (ValueError, UnicodeError):
+                        if not base:
+                            raise
+                        saved = {}  # legacy stale sidecar cannot hide a wrapper
+                    if not base or saved.get("wrapper_metadata") is True:
+                        raw = bytes.fromhex(saved["header"])
+                        if len(raw) != 64:
+                            raise QDOSError(BN)
+                        if base:
+                            header[52:64] = raw[52:64]
+                        else:
+                            header[:] = raw
             size -= base
             if size > MAX_FILE:
                 raise QDOSError(-4)
@@ -223,6 +243,10 @@ class Session:
         self.header = header
         self.payload_base = base
         self.drive = str(drive)
+        self.modified = mode in (2, 3)
+        self.date_fixed = self.version_fixed = False
+        if self.modified:
+            self.header[52:56] = struct.pack(">I", qdos_now())
         try:
             if mode in (2, 3):
                 self.save_header()  # discard stale metadata after overwrite
@@ -301,7 +325,10 @@ class Session:
             raise QDOSError(BP)
         self.file.seek(self.payload_base + offset)
         # Return an actual count; a short disk write must never be acknowledged as full.
-        return self.file.write(data)
+        actual = self.file.write(data)
+        if actual:
+            self.modified = True
+        return actual
 
     def read_header(self):
         self.require_file()
@@ -312,8 +339,9 @@ class Session:
 
     def set_header(self, data):
         self.require_file(writing=True)
+        self.modified = True
         if self.payload_base:
-            # Keep the wrapper authoritative; never create a competing sidecar.
+            # Embedded type/data-space attributes remain authoritative.
             self.file.seek(20)
             write_all(self.file, data[4:14])
             self.flush()
@@ -322,9 +350,85 @@ class Session:
             self.header[4:14] = data[4:14]  # length is maintained from the payload
             self.save_header()
 
+    def file_date(self, value, selector):
+        self.require_file()
+        if self.mode == 4:
+            raise QDOSError(BP)
+        if selector not in (0, 2):
+            raise QDOSError(BP)
+        offset = 52 if selector == 0 else 60
+        if value != 0xFFFFFFFF:
+            if selector == 0:
+                self.require_file(writing=True)
+            value = qdos_now() if value == 0 else value
+            old = self.header[:]
+            self.header[offset:offset + 4] = struct.pack(">I", value)
+            try:
+                self.save_header()
+            except Exception:
+                self.header[:] = old
+                raise
+            if selector == 0:
+                self.date_fixed = True
+        return struct.unpack(">I", self.header[offset:offset + 4])[0]
+
+    def file_version(self, value):
+        self.require_file()
+        if self.mode == 4:
+            raise QDOSError(BP)
+        if value != 0xFFFFFFFF:
+            if value > 65535:
+                raise QDOSError(BP)
+            # Zero preserves the current version, including on read-only COPY sources.
+            if value:
+                self.require_file(writing=True)
+                old = self.header[:]
+                self.header[56:58] = struct.pack(">H", value)
+                try:
+                    self.save_header()
+                except Exception:
+                    self.header[:] = old
+                    raise
+            self.version_fixed = True
+        return struct.unpack(">H", self.header[56:58])[0]
+
+    def extended_info(self, key):
+        self.require_file()
+        if key != 0:
+            raise QDOSError(BP)
+        usage = shutil.disk_usage(self.path if self.mode == 4 else self.path.parent)
+        info = bytearray(64)
+        label = ("SNL" + self.drive).encode("ascii")[:20]
+        info[:2] = struct.pack(">H", len(label))
+        info[2:2 + len(label)] = label
+        info[22:27] = b"\x00\x03SNL"
+        info[28] = int(self.drive)
+        # A shared file channel does not make the medium read-only.
+        info[29] = 0 if os.access(self.drives[self.drive], os.W_OK) else 1
+        struct.pack_into(">HIII", info, 30, 512,
+                         min(usage.total // 512, 0xFFFFFFFF),
+                         min(usage.free // 512, 0xFFFFFFFF), 64)
+        info[44] = 1  # QDOS logical file/header format
+        info[47] = 2  # host disk
+        info[49:64] = b"\xff" * 15
+        return bytes(info)
+
     def flush(self):
         self.require_file()
         if self.mode not in (1, 4):
+            if self.modified:
+                old = self.header[:]
+                if not self.date_fixed:
+                    self.header[52:56] = struct.pack(">I", qdos_now())
+                if not self.version_fixed:
+                    version = struct.unpack(">H", self.header[56:58])[0]
+                    self.header[56:58] = struct.pack(">H", (version + 1) & 65535)
+                try:
+                    self.save_header()
+                except Exception:
+                    self.header[:] = old
+                    raise
+                self.modified = False
             self.file.flush()
             os.fsync(self.file.fileno())
 
@@ -352,7 +456,8 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
         return
     if trace:
         names = {0x11: "OPEN", 0x12: "READ", 0x13: "WRITE", 0x04: "CLOSE",
-                 0x15: "READ HEADER", 0x16: "SET HEADER", 0x17: "FLUSH", 0x18: "MEDIUM INFO"}
+                 0x15: "READ HEADER", 0x16: "SET HEADER", 0x17: "FLUSH", 0x18: "MEDIUM INFO",
+                 0x19: "FILE DATE", 0x1C: "FILE VERSION", 0x1D: "EXTENDED INFO"}
     if trace:
         print(f"RX command=${cmd:02X} {names.get(cmd, 'UNKNOWN')}", flush=True)
     if cmd == 0x11:
@@ -384,6 +489,19 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
                 reply = status(0 if actual == count else DF) + struct.pack(">H", actual)
         except (OSError, ValueError, QDOSError) as exc:
             reply = status(error_code(exc)) + b"\x00\x00"
+    elif cmd in (0x19, 0x1C, 0x1D):
+        # Consume request before validation; errors contain status only.
+        value = struct.unpack(">I", read_exact(port, 4))[0]
+        selector = read_exact(port, 1)[0] if cmd == 0x19 else None
+        try:
+            if cmd == 0x19:
+                reply = status(0) + struct.pack(">I", session.file_date(value, selector))
+            elif cmd == 0x1C:
+                reply = status(0) + struct.pack(">I", session.file_version(value))
+            else:
+                reply = status(0) + session.extended_info(value)
+        except (OSError, ValueError, QDOSError) as exc:
+            reply = status(error_code(exc))
     elif cmd in (0x04, 0x15, 0x16, 0x17, 0x18):
         data = read_exact(port, 14) if cmd == 0x16 else None
         try:

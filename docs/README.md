@@ -1,10 +1,13 @@
 # Documentation
 
 Start with the [project README](../README.md) for the V2.28 release binary,
-matching source and tested operations. Run commands from the repo root unless a
+and tested operations. Current source is the V2.29 metadata candidate. Run commands from the repo root unless a
 guide explicitly says otherwise.
 
 ## Practical guides
+
+- [V2.29 metadata test plan](METADATA_TEST.md): file versions, extended medium
+  information, host-clock dates and QL Unzip timestamp restoration.
 
 - [1024-byte READ experiment](READ_BLOCK_1024.md): historical V2.26 changes
   and results; V2.27 restores the 512-byte driver cache and daemon limit.

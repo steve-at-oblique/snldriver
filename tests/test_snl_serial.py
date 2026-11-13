@@ -361,7 +361,7 @@ class SerialTests(unittest.TestCase):
         raw = (self.root / "test_bas").read_bytes()
         expected_payload = payload[:1] + b"XY" + payload[3:] + b"MORE"
         self.assertEqual(raw, wrapper[:20] + metadata + wrapper[30:] + expected_payload)
-        self.assertFalse((self.root / ".snl_headers").exists())
+        self.assertTrue((self.root / ".snl_headers" / "test_bas.json").exists())
         self.assertEqual(self.open(mode=1), b"\x00" + struct.pack(">I", len(expected_payload)))
         self.assertEqual(self.request(b"\x15")[5:15], metadata)
 

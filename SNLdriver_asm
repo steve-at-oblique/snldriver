@@ -31,7 +31,7 @@
 ; Applies to Steve Jennen's original contributions. Existing third-party
 ; copyright and redistribution notices are retained at the end of this file.
 ;
-; Version       : 2.28 (legacy serial service during bulk receive)
+; Version       : 2.29 candidate (dates, versions and extended medium information)
 ; Wire protocol : SNL v2, with readiness handshake and directory support
 ; Target        : Sinclair QL / Motorola 68000 instruction set
 ; Assembler     : Talent/Quanta Assembler 2.02
@@ -107,6 +107,7 @@ fs.heads equ      $46                       ; set file header
 fs.headr equ      $47                       ; read file header
 fs.load  equ      $48                       ; load file
 fs.save  equ      $49                       ; save file
+fs.date  equ      $4C                       ; file update/backup date
 fs.vers  equ      $4E                       ; optional file version query/set
 fs.xinf  equ      $4F                       ; optional extended medium information
 
@@ -159,7 +160,7 @@ boot_err bsr      dbg_boot
          rts
 
 banner   dc.w     67                        ; text bytes only; exclude Talent alignment padding
-         dc.b     'SNL Device driver V2.28 - BSD-2-Clause',10
+         dc.b     'SNL Device driver V2.29 - BSD-2-Clause',10
          dc.b     'Copyright 2026 Steve Jennen',10
 ban_end  equ      *
          dc.b     0                         ; word alignment
@@ -567,13 +568,12 @@ io_main  movem.l  d2-d7/a0/a2-a6,-(a7)
          beq      io_pos
          cmpi.b   #fs.posre,d0
          beq      io_rel
-; Toolkit COPY and DIR probe optional version and medium information.
-; Return Not Implemented quietly; do not claim metadata was preserved.
-
+         cmpi.b   #fs.date,d0
+         beq      io_date
          cmpi.b   #fs.vers,d0
-         beq      io_ni
+         beq      io_vers
          cmpi.b   #fs.xinf,d0
-         beq      io_ni
+         beq      io_xinf
          bsr      dbg_io
 io_ni    moveq    #err.ni,d0
          bra      io_ret
@@ -671,6 +671,51 @@ io_icopy move.b   (a2)+,(a1)+
          bra      io_ok
 io_ierr  adda.w   #10,a7
          moveq    #0,d1
+         bra      io_ret
+; Metadata requests: key in D1.L; date selector in D2.B. Preserve A1.
+io_date moveq    #$19,d7
+         bra      io_meta
+io_vers moveq    #$1C,d7
+         bra      io_meta
+io_xinf moveq    #$1D,d7
+io_meta move.l   d1,d5
+         move.l   d7,d1
+         bsr      snl_send
+         bne      io_merr
+         move.l   d5,d1
+         bsr      snl_putl
+         bne      io_merr
+         cmpi.b   #$19,d7
+         bne      io_mstat
+         move.l   d2,d1
+         bsr      snl_send
+         bne      io_merr
+io_mstat bsr      snl_stat
+         bne      io_merr
+         cmpi.b   #$1D,d7
+         beq      io_xread
+         bsr      snl_getl
+         bra      io_ret
+io_merr  move.l   d5,d1
+         bra      io_ret
+; Drain complete response into scratch before touching caller's buffer.
+; XINF preserves D1 and A1, including on transport failures.
+io_xread suba.w  #64,a7
+         move.l   a1,a4
+         move.l   a7,a1
+         moveq    #64,d2
+         bsr      snl_bget
+         move.l   a4,a1
+         tst.l    d0
+         bne      io_xerr
+         move.l   a7,a2
+         moveq    #64,d6
+io_xcopy move.b   (a2)+,(a1)+
+         subq.w   #1,d6
+         bne      io_xcopy
+io_xerr  move.l   a4,a1
+         adda.w   #64,a7
+         move.l   d5,d1
          bra      io_ret
 io_headr moveq    #0,d5
          move.w   d2,d5
