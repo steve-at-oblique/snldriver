@@ -1,0 +1,38 @@
+10 REMark SNL V2.30: use fresh disposable names before repeating
+20 a$="snl1_rt230_old": b$="snl1_rt230_new": bad=0
+30 OPEN_NEW #3,a$
+40 FOR i=65 TO 72: BPUT #3,i
+50 SET_FVERS #3,42
+60 SET_FUPDT #3,1700000000
+70 CLOSE #3
+80 RENAME a$ TO b$
+90 OPEN #3,b$
+100 IF FLEN(#3)<>8 THEN bad=bad+1
+110 IF FVERS(#3)<>42 THEN bad=bad+1
+120 IF FUPDT(#3)<>1700000000 THEN bad=bad+1
+130 BGET #3,x,y
+140 IF x<>65 OR y<>66 THEN bad=bad+1
+150 REMark Read has primed the cache; truncate at current position 2
+160 TRUNCATE #3
+170 IF FLEN(#3)<>2 THEN bad=bad+1
+180 BPUT #3,88,89
+190 CLOSE #3
+200 OPEN_IN #3,b$
+210 IF FLEN(#3)<>4 THEN bad=bad+1
+220 BGET #3,w,x,y,z
+230 IF w<>65 OR x<>66 OR y<>88 OR z<>89 THEN bad=bad+1
+240 CLOSE #3
+250 OPEN #3,b$
+260 TRUNCATE #3\0
+270 FLUSH #3
+280 IF FLEN(#3)<>0 THEN bad=bad+1
+290 BPUT #3,90
+300 CLOSE #3
+310 OPEN_IN #3,b$
+320 IF FLEN(#3)<>1 THEN bad=bad+1
+330 BGET #3,x
+340 IF x<>90 THEN bad=bad+1
+350 CLOSE #3
+360 IF bad=0 THEN PRINT "PASS: rename, metadata, truncate and append"
+370 IF bad<>0 THEN PRINT "FAIL: checks failed: ";bad
+380 PRINT "Final file: ";b$;" (one byte, Z)"

@@ -1,7 +1,8 @@
 # V2.29 candidate: versions, extended information and dates
 
-The source now identifies itself as V2.29. The distributed
-`bin/snldriver228_bin` remains the distributed V2.28 release. V2.29 hardware
+This guide records V2.29 metadata testing. Current source is the
+[V2.30 rename/truncate release](RENAME_TRUNCATE.md). The distributed
+`bin/snldriver230_bin` is the current distributed release. V2.29 hardware
 results reported by the user are recorded below; no V2.29 binary has been
 added to this repository.
 
@@ -93,8 +94,8 @@ validate instruction encoding, ROM behavior or physical serial timing.
   logical header size 64, and a host-disk medium type. A1 and D1 are preserved.
   Read-only describes the configured medium's host access, not OPEN_IN mode.
 
-XINF success is traditionally used as a level-2 capability probe. SNL still
-has no rename, truncate or subdirectory creation. Applications must tolerate
+XINF success is traditionally used as a level-2 capability probe. V2.29 still
+had no rename, truncate or subdirectory creation; V2.30 adds rename/truncate. Applications must tolerate
 Not Implemented for those operations; test actual callers before assuming
 full level-2 compatibility. Format remains unsupported.
 

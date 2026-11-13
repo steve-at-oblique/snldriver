@@ -37,7 +37,7 @@ class CacheCPU:
                     self.symbols[m[1].lower()] = eval(expression, {"__builtins__": {}}, {})
         source = (ROOT / "SNLdriver_asm").read_bytes().decode("latin1")
         source = (source[source.index("op_main "):source.index("; I/O: preserve")]
-                  + source[source.index("io_info "):source.index("io_ov    ")]
+                  + source[source.index("io_info "):source.index("io_ok    ")]
                   + source[source.index("snl_xfer "):source.index("; CLOSE closes")])
         self.code, self.labels = [], {}
         for line in source.splitlines():
@@ -168,10 +168,14 @@ class CacheCPU:
     def transmit(self, data):
         self.wire.extend(data)
         cmd = self.wire[0]
-        assert cmd in (0x11, 0x12, 0x13, 0x15, 0x18, 0x19, 0x1C, 0x1D, ord("~")), self.wire.hex()
+        assert cmd in (0x11, 0x12, 0x13, 0x15, 0x18, 0x19, 0x1C, 0x1D, 0x1E, 0x1F, ord("~")), self.wire.hex()
         if cmd == ord("~"):
             count, length = 0, 22
-        elif cmd in (0x19, 0x1C, 0x1D):
+        elif cmd == 0x1E:
+            if len(self.wire) < 2:
+                return
+            count, length = 0, 2 + self.wire[1]
+        elif cmd in (0x19, 0x1C, 0x1D, 0x1F):
             count, length = 0, 6 if cmd == 0x19 else 5
         elif cmd == 0x11:
             if len(self.wire) < 4:
@@ -503,6 +507,72 @@ class BufferTests(unittest.TestCase):
         cpu.reg.update(d1=0xFFFFFFFF)
         self.assertEqual(cpu.run("io_date")[0], -13)
         self.assertEqual(cpu.reg["a1"], 0x4000)
+
+    def rename_request(self, cpu, name):
+        cpu.reg["a1"] = 0x10000
+        cpu.mem[0x10000:0x10002] = len(name).to_bytes(2, "big")
+        cpu.mem[0x10002:0x10002 + len(name)] = name
+        return cpu.run("io_rnam")[0]
+
+    def test_rename_handler_updates_qdos_filename_only_on_success(self):
+        cpu = self.cpu(b"abc")
+        self.assertEqual(self.rename_request(cpu, b"snl1_Renamed"), 0)
+        offset = 0x2000 + cpu.symbols["fs_fname"]
+        self.assertEqual(cpu.mem[offset:offset + 9], b"\x00\x07Renamed")
+        self.assertEqual(cpu.reg["a1"], 0x10000)
+        self.assertFalse(cpu.reply)
+        before = cpu.mem[offset:offset + 38]
+        (self.root / "occupied").write_bytes(b"other")
+        self.assertEqual(self.rename_request(cpu, b"snl1_occupied"), snl.EX)
+        self.assertEqual(cpu.mem[offset:offset + 38], before)
+
+    def test_rename_maximum_filename_length(self):
+        cpu = self.cpu(b"abc")
+        name = b"n" * 36
+        self.assertEqual(self.rename_request(cpu, b"snl1_" + name), 0)
+        offset = 0x2000 + cpu.symbols["fs_fname"]
+        self.assertEqual(cpu.mem[offset:offset + 38], b"\x00\x24" + name)
+        self.assertEqual(self.session.name, name)
+
+    def test_truncate_handler_clears_cached_tail_and_allows_append(self):
+        cpu = self.cpu(b"abcdefgh")
+        self.assertEqual(cpu.transfer(2), (0, b"ab"))
+        self.assertGreater(cpu.field("snl_len", width=2), 0)
+        self.assertEqual(cpu.run("io_trnc")[0], 0)
+        self.assertEqual(cpu.field("fs_nblok"), 2)
+        self.assertEqual(cpu.field("fs_eblok"), 2)
+        self.assertEqual(cpu.field("snl_len", width=2), 0)
+        self.assertEqual(cpu.field("snl_err", width=2), 0)
+        self.assertEqual(cpu.transfer(1)[0], snl.EF)
+        self.assertEqual(cpu.transfer(2, action=1, data=b"XY")[0], 0)
+        self.assertEqual(self.session.read(0, 4), b"abXY")
+
+    def test_truncate_error_leaves_driver_eof_cache_and_position(self):
+        cpu = self.cpu(b"abcdef")
+        cpu.field("fs_nblok", 7)
+        cpu.field("snl_len", 6, 2)
+        self.assertEqual(cpu.run("io_trnc")[0], snl.BP)
+        self.assertEqual(cpu.field("fs_eblok"), 6)
+        self.assertEqual(cpu.field("fs_nblok"), 7)
+        self.assertEqual(cpu.field("snl_len", width=2), 6)
+
+    def test_rename_truncate_readonly_are_rejected_before_wire(self):
+        for mode in (1, 4):
+            for entry in ("io_rnam", "io_trnc"):
+                cpu = self.cpu(b"abc")
+                cpu.field("snl_mode", mode, 1)
+                self.assertEqual(cpu.run(entry)[0], snl.RO)
+                self.assertFalse(cpu.requests)
+
+    def test_rename_length_validation_and_transport_failure(self):
+        for name in (b"snl1_", b"snl1_" + b"a" * 37):
+            cpu = self.cpu(b"abc")
+            self.assertEqual(self.rename_request(cpu, name), snl.BN)
+            self.assertFalse(cpu.requests)
+        cpu = self.cpu(b"abc")
+        cpu.truncate_reply = 0
+        self.assertEqual(cpu.run("io_trnc")[0], -13)
+        self.assertEqual(cpu.field("fs_eblok"), 3)
 
     def test_loader_character_reads_need_four_requests(self):
         payload = LOADER_FIXTURE.read_bytes()

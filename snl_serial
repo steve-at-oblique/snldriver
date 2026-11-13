@@ -350,6 +350,56 @@ class Session:
             self.header[4:14] = data[4:14]  # length is maintained from the payload
             self.save_header()
 
+    def rename(self, full_name):
+        self.require_file(writing=True)
+        # IOF.RNAM supplies a device-qualified QDOS name; no cross-drive moves.
+        if (len(full_name) < 6 or full_name[:3].lower() != b"snl"
+                or full_name[4:5] != b"_"
+                or full_name[3:4] != self.drive.encode("ascii")):
+            raise QDOSError(BN)
+        name = full_name[5:]
+        matched = self.resolve_name(self.drive, name)
+        old = self.path
+        if old.is_symlink() or matched.is_symlink():
+            raise QDOSError(BN)
+        if matched != old and matched.exists():
+            raise QDOSError(EX)
+        dest = old.parent / name.decode("ascii")
+        if dest == old:
+            return
+        old_meta = self.meta_path()
+        new_meta = old_meta.with_name(dest.name + ".json")
+        if (old_meta.parent.is_symlink() or old_meta.is_symlink()
+                or (old_meta.exists() and not old_meta.is_file())):
+            raise QDOSError(BN)
+        # Orphan metadata must not be overwritten either. Allow a case-only
+        # rename of the same entry on a case-insensitive host filesystem.
+        for entry in old_meta.parent.iterdir() if old_meta.parent.exists() else ():
+            if entry.name.lower() == new_meta.name.lower() and entry != old_meta:
+                raise QDOSError(EX)
+        old.rename(dest)
+        try:
+            if old_meta.exists():
+                old_meta.rename(new_meta)
+        except OSError:
+            try:
+                dest.rename(old)
+            except OSError:
+                # Keep subsequent operations pointed at the actual payload.
+                self.path, self.name = dest, name
+                raise
+            raise
+        self.path, self.name = dest, name
+
+    def truncate(self, offset):
+        self.require_file(writing=True)
+        size = self.file_size()
+        if not 0 <= offset <= size:
+            raise QDOSError(BP)
+        if offset != size:
+            self.file.truncate(self.payload_base + offset)
+            self.modified = True
+
     def file_date(self, value, selector):
         self.require_file()
         if self.mode == 4:
@@ -457,7 +507,8 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
     if trace:
         names = {0x11: "OPEN", 0x12: "READ", 0x13: "WRITE", 0x04: "CLOSE",
                  0x15: "READ HEADER", 0x16: "SET HEADER", 0x17: "FLUSH", 0x18: "MEDIUM INFO",
-                 0x19: "FILE DATE", 0x1C: "FILE VERSION", 0x1D: "EXTENDED INFO"}
+                 0x19: "FILE DATE", 0x1C: "FILE VERSION", 0x1D: "EXTENDED INFO",
+                 0x1E: "RENAME", 0x1F: "TRUNCATE"}
     if trace:
         print(f"RX command=${cmd:02X} {names.get(cmd, 'UNKNOWN')}", flush=True)
     if cmd == 0x11:
@@ -489,6 +540,20 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
                 reply = status(0 if actual == count else DF) + struct.pack(">H", actual)
         except (OSError, ValueError, QDOSError) as exc:
             reply = status(error_code(exc)) + b"\x00\x00"
+    elif cmd in (0x1E, 0x1F):
+        if cmd == 0x1E:
+            length = read_exact(port, 1)[0]
+            name = read_exact(port, length)
+        else:
+            offset = struct.unpack(">I", read_exact(port, 4))[0]
+        try:
+            if cmd == 0x1E:
+                session.rename(name)
+            else:
+                session.truncate(offset)
+            reply = status(0)
+        except (OSError, ValueError, UnicodeError, QDOSError) as exc:
+            reply = status(error_code(exc))
     elif cmd in (0x19, 0x1C, 0x1D):
         # Consume request before validation; errors contain status only.
         value = struct.unpack(">I", read_exact(port, 4))[0]

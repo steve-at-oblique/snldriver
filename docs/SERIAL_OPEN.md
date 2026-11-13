@@ -514,3 +514,8 @@ serial polling overhead still apply.
 The current source adds FILE DATE ($19), FILE VERSION ($1C), and EXTENDED
 INFO ($1D). See [metadata protocol and hardware tests](METADATA_TEST.md) for
 request/reply layouts, date/version semantics and daemon compatibility.
+
+## V2.30 rename/truncate candidate
+
+The source adds RENAME ($1E) and TRUNCATE ($1F). See the
+[protocol and hardware test plan](RENAME_TRUNCATE.md).

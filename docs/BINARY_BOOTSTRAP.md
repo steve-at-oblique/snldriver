@@ -5,7 +5,7 @@ LBYTES protocol. The existing `tools/qltransfer` text sender remains available;
 the old base64 loaders are retained as fixtures/reference material. The binary
 bootstrap has been used on physical QL hardware during this project.
 
-For the 4,254-byte V2.28 SNL driver, stop the daemon and reset the QL,
+For the 4,592-byte V2.30 SNL driver, stop the daemon and reset the QL,
 then type on the QL:
 
 ```text
@@ -21,7 +21,7 @@ bytes as temporary header storage, so allocations must also be at least 14.
 While the QL is waiting in LBYTES, run on Linux:
 
 ```sh
-python3 tools/qltransfer_bin bin/snldriver228_bin
+python3 tools/qltransfer_bin bin/snldriver230_bin
 ```
 
 Use the filename of the driver binary you actually want to install. When the

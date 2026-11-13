@@ -1,10 +1,13 @@
 # Documentation
 
-Start with the [project README](../README.md) for the V2.28 release binary,
-and tested operations. Current source is the V2.29 metadata candidate. Run commands from the repo root unless a
-guide explicitly says otherwise.
+Start with the [project README](../README.md) for the V2.30 release binary
+and tested operations. Run commands from the repo root unless a guide
+explicitly says otherwise.
 
 ## Practical guides
+
+- [V2.30 rename/truncate test plan](RENAME_TRUNCATE.md): payload and sidecar
+  renaming, collisions, cache invalidation and truncation/append tests.
 
 - [V2.29 metadata test plan](METADATA_TEST.md): file versions, extended medium
   information, host-clock dates and QL Unzip timestamp restoration.
