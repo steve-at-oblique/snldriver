@@ -31,7 +31,7 @@
 ; Applies to Steve Jennen's original contributions. Existing third-party
 ; copyright and redistribution notices are retained at the end of this file.
 ;
-; Version       : 2.30 (rename and truncate)
+; Version       : 2.31 (Level-2 directories)
 ; Wire protocol : SNL v2, with readiness handshake and directory support
 ; Target        : Sinclair QL / Motorola 68000 instruction set
 ; Assembler     : Talent/Quanta Assembler 2.02
@@ -110,6 +110,7 @@ fs.save  equ      $49                       ; save file
 fs.rnam  equ      $4A                       ; rename open file
 fs.trnc  equ      $4B                       ; truncate at current position
 fs.date  equ      $4C                       ; file update/backup date
+fs.mkdr  equ      $4D                       ; convert empty file to directory
 fs.vers  equ      $4E                       ; optional file version query/set
 fs.xinf  equ      $4F                       ; optional extended medium information
 
@@ -162,7 +163,7 @@ boot_err bsr      dbg_boot
          rts
 
 banner   dc.w     67                        ; text bytes only; exclude Talent alignment padding
-         dc.b     'SNL Device driver V2.30 - BSD-2-Clause',10
+         dc.b     'SNL Device driver V2.31 - BSD-2-Clause',10
          dc.b     'Copyright 2026 Steve Jennen',10
 ban_end  equ      *
          dc.b     0                         ; word alignment
@@ -576,6 +577,8 @@ io_main  movem.l  d2-d7/a0/a2-a6,-(a7)
          beq      io_trnc
          cmpi.b   #fs.date,d0
          beq      io_date
+         cmpi.b   #fs.mkdr,d0
+         beq      io_mkdr
          cmpi.b   #fs.vers,d0
          beq      io_vers
          cmpi.b   #fs.xinf,d0
@@ -735,6 +738,32 @@ io_trnc cmpi.b   #io.share,snl_mode(a5)
          clr.w    snl_len(a5)
          clr.w    snl_err(a5)
          bra      io_ok
+; Convert an open empty exclusive file; success returns directory stream size.
+io_mkdr cmpi.b   #io.share,snl_mode(a5)
+         beq      io_ro
+         cmpi.b   #io.dir,snl_mode(a5)
+         beq      io_ro
+         move.l   d1,d5                    ; preserve caller value; no option keys used
+         moveq    #$20,d1
+         bsr      snl_send
+         bne      io_kerr
+         moveq    #0,d1
+         bsr      snl_putl
+         bne      io_kerr
+         bsr      snl_stat
+         bne      io_kerr
+         bsr      snl_getl
+         bne      io_kerr
+         move.l   d1,fs_eblok(a5)
+         clr.l    fs_nblok(a5)
+         clr.w    snl_len(a5)
+         clr.w    snl_err(a5)
+         move.b   #io.dir,snl_mode(a5)
+         move.b   #io.dir,fs_acces(a5)
+         move.l   d5,d1
+         bra      io_ok
+io_kerr  move.l   d5,d1
+         bra      io_ret
 ; Metadata requests: key in D1.L; date selector in D2.B. Preserve A1.
 io_date moveq    #$19,d7
          bra      io_meta

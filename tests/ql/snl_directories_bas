@@ -1,0 +1,36 @@
+10 REMark SNL V2.31 + Toolkit II or SMSQ/E: use fresh directory name
+20 testroot$="snl1_dir231_"
+22 testsub$=testroot$ & "sub_"
+30 testold$=testroot$ & "old_dat"
+32 testnew$=testsub$ & "new_dat"
+34 bad=0
+40 REMark Create a flat prefixed file before making its real directory
+50 OPEN_NEW #3,testold$
+60 BPUT #3,65,66,67,68
+70 CLOSE #3
+80 MAKE_DIR testroot$
+90 MAKE_DIR testsub$
+100 OPEN_IN #3,testold$
+110 IF FLEN(#3)<>4 THEN bad=bad+1
+120 BGET #3,a,b,c,e
+130 IF a<>65 OR b<>66 OR c<>67 OR e<>68 THEN bad=bad+1
+140 CLOSE #3
+150 RENAME testold$ TO testnew$
+160 OPEN #3,testnew$
+170 TRUNCATE #3\2
+180 BPUT #3,88
+190 CLOSE #3
+200 OPEN_IN #3,testnew$
+210 IF FLEN(#3)<>3 THEN bad=bad+1
+220 BGET #3,a,b,c
+230 IF a<>65 OR b<>66 OR c<>88 THEN bad=bad+1
+240 CLOSE #3
+250 PRINT "Directory should contain sub ->"
+260 DIR testroot$
+270 PRINT "Subdirectory should contain new_dat"
+280 DIR testsub$
+290 DELETE testnew$
+300 DELETE testsub$
+310 DELETE testroot$
+320 IF bad=0 THEN PRINT "PASS: directories, adoption, move, truncate, delete"
+330 IF bad<>0 THEN PRINT "FAIL: checks failed: ";bad

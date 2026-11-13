@@ -152,23 +152,83 @@ class Session:
             if tmp is not None:
                 os.unlink(tmp)
 
-    def resolve_name(self, drive, name):
+    @staticmethod
+    def validate_name(name, empty=False):
+        text = name.decode("ascii")
+        if ((not name and not empty) or len(name) > 36 or text in (".", "..")
+                or any(c in text for c in ("/", "\\", "\x00"))
+                or text.lower().startswith(".snl_")):
+            raise QDOSError(BN)
+        return text
+
+    def drive_root(self, drive):
         root = self.drives.get(str(drive))
         if root is None or not root.is_dir():
             raise QDOSError(NF)
-        text = name.decode("ascii")
-        if not 1 <= len(name) <= 36 or text in (".", "..") or any(c in text for c in ("/", "\\", "\x00")) or text.lower().startswith(".snl_"):
-            raise QDOSError(BN)
-        # Match QDOS names without changing the host's stored spelling.
-        # Scan on every OPEN so emulator-created files are visible immediately.
-        matches = [entry for entry in root.iterdir()
-                   if entry.name.isascii() and entry.name.lower() == text.lower()]
+        return root
+
+    def match_entry(self, parent, text):
+        matches = [p for p in parent.iterdir()
+                   if p.name.isascii() and p.name.lower() == text.lower()]
         if len(matches) > 1:
-            raise QDOSError(BN)  # two Linux names cannot identify one QDOS file
-        path = matches[0] if matches else root / text
-        if path.resolve().parent != root:
             raise QDOSError(BN)
-        return path
+        if matches and matches[0].is_symlink():
+            raise QDOSError(BN)
+        return matches[0] if matches else None
+
+    def resolve_name(self, drive, name):
+        text = self.validate_name(name)
+        parent = self.drive_root(drive)
+        while True:
+            self.validate_name(text.encode("ascii"))
+            # Exact flat names win, preserving existing underscore filenames.
+            exact = self.match_entry(parent, text)
+            if exact is not None:
+                return exact
+            # A trailing underscore may name a directory rather than a file.
+            if text.endswith("_"):
+                exact = self.match_entry(parent, text[:-1])
+                if exact is not None and exact.is_dir():
+                    return exact
+            # Longest existing directory prefix wins; never split every '_'.
+            prefixes = [p for p in parent.iterdir()
+                        if p.name.isascii() and not p.name.startswith(".")
+                        and text.lower().startswith(p.name.lower() + "_")
+                        and p.is_dir() and not p.is_symlink()]
+            if not prefixes:
+                return parent / text
+            chosen = max(prefixes, key=lambda p: len(p.name))
+            self.match_entry(parent, chosen.name)  # reject ambiguous case aliases
+            text = text[len(chosen.name) + 1:]
+            parent = chosen
+
+    def qdos_name(self, drive, path):
+        return "_".join(path.relative_to(self.drive_root(drive)).parts).encode("ascii")
+
+    def directory_scope(self, drive, name):
+        self.validate_name(name, empty=True)
+        root = self.drive_root(drive)
+        if not name:
+            return root, ""
+        path = self.resolve_name(drive, name)
+        if path.is_dir():
+            return path, ""
+        return path.parent, path.name
+
+    def directory_header(self, drive, path):
+        header = bytearray(64)
+        meta = path.parent / ".snl_headers" / (path.name + ".json")
+        if meta.parent.is_symlink() or meta.is_symlink():
+            raise QDOSError(BN)
+        if meta.exists():
+            raw = bytes.fromhex(json.loads(meta.read_text())["header"])
+            if len(raw) != 64:
+                raise QDOSError(BN)
+            header[:] = raw
+        header[5] = 255
+        name = self.qdos_name(drive, path)
+        header[14:52] = struct.pack(">H", len(name)) + name.ljust(36, b"\x00")
+        return header
 
     def delete(self, drive, name):
         if self.file is not None:
@@ -178,13 +238,24 @@ class Session:
             raise QDOSError(BN)
         if not path.exists():
             raise QDOSError(NF)
-        if not path.is_file():
+        if not (path.is_file() or path.is_dir()):
             raise QDOSError(BN)
         directory = path.parent / ".snl_headers"
         meta = directory / (path.name + ".json")
         if directory.is_symlink() or meta.is_symlink() or (meta.exists() and not meta.is_file()):
             raise QDOSError(BN)
-        path.unlink()
+        if path.is_dir():
+            children = list(path.iterdir())
+            internal = path / ".snl_headers"
+            # Only empty metadata storage may be removed implicitly.
+            if any(child != internal for child in children) or (internal.exists() and
+                    (internal.is_symlink() or not internal.is_dir() or any(internal.iterdir()))):
+                raise QDOSError(IU)
+            if internal.exists():
+                internal.rmdir()
+            path.rmdir()
+        else:
+            path.unlink()
         meta.unlink(missing_ok=True)
 
     def open(self, drive, mode, name):
@@ -194,6 +265,10 @@ class Session:
             raise QDOSError(NI)
         path = self.resolve_name(drive, name)
         root = path.parent
+        if path.is_dir():
+            if mode in (2, 3):
+                raise QDOSError(EX)
+            return self.open_directory(drive, name)
         if mode == 2 and path.exists():
             raise QDOSError(EX)
         # A new OPEN recovers a stale session after a QL-side port close/reopen.
@@ -239,7 +314,7 @@ class Session:
         except Exception:
             f.close()
             raise
-        self.file, self.path, self.name, self.mode = f, path, path.name.encode("ascii"), mode
+        self.file, self.path, self.name, self.mode = f, path, self.qdos_name(drive, path), mode
         self.header = header
         self.payload_base = base
         self.drive = str(drive)
@@ -257,43 +332,47 @@ class Session:
         return size
 
     def open_directory(self, drive, name):
-        root = self.drives.get(str(drive))
-        if root is None or not root.is_dir():
-            raise QDOSError(NF)
-        prefix = name.decode("ascii")
-        if len(name) > 36 or prefix in (".", "..") or any(c in prefix for c in ("/", "\\", "\x00")) or prefix.lower().startswith(".snl_"):
-            raise QDOSError(BN)
+        folder, prefix = self.directory_scope(drive, name)
         self.close()
         records = bytearray()
         seen = set()
-        reader = Session({str(drive): root})
+        reader = Session(self.drives)
         try:
-            for path in sorted(root.iterdir(), key=lambda p: (p.name.lower(), p.name)):
+            for path in sorted(folder.iterdir(), key=lambda p: (p.name.lower(), p.name)):
                 text = path.name
-                if (text.startswith(".") or not text.isascii() or len(text) > 36
+                if (text.startswith(".") or not text.isascii()
                         or "\\" in text or not text.lower().startswith(prefix.lower())
-                        or path.is_symlink() or not path.is_file()):
+                        or path.is_symlink() or not (path.is_file() or path.is_dir())):
+                    continue
+                logical = self.qdos_name(drive, path)
+                if len(logical) > 36:
                     continue
                 if text.lower() in seen:
                     raise QDOSError(BN)
                 seen.add(text.lower())
-                # Reuse the exact OPEN metadata/wrapper interpretation.
-                reader.open(drive, 1, text.encode("ascii"))
-                header = bytearray(reader.read_header())
-                size = reader.file_size()
-                # Directory records use QDOS's stored length including header.
+                if path.is_dir():
+                    header = self.directory_header(drive, path)
+                    size = 0
+                else:
+                    if reader.resolve_name(drive, logical) != path:
+                        raise QDOSError(BN)
+                    reader.open(drive, 1, logical)
+                    header = bytearray(reader.read_header())
+                    size = reader.file_size()
+                    reader.close()
                 header[:4] = struct.pack(">I", size + 64)
                 records.extend(header)
-                reader.close()
                 if len(records) > MAX_FILE:
                     raise QDOSError(-4)
         finally:
             reader.close()
         self.file = io.BytesIO(records)
-        self.path, self.name, self.mode = root, name, 4
+        self.path, self.name, self.mode = folder, name, 4
         self.drive = str(drive)
-        self.header, self.payload_base = bytearray(64), 0
-        self.header[5] = 255  # directory
+        self.header = self.directory_header(drive, folder) if folder != self.drive_root(drive) else bytearray(64)
+        self.payload_base = 0
+        self.modified = False
+        self.header[5] = 255
         return len(records)
 
     def file_size(self):
@@ -364,19 +443,25 @@ class Session:
             raise QDOSError(BN)
         if matched != old and matched.exists():
             raise QDOSError(EX)
-        dest = old.parent / name.decode("ascii")
+        # Resolve the destination parent using the same directory rules.
+        dest = matched.parent / (name.decode("ascii") if matched.parent == self.drive_root(self.drive)
+                                 else name.decode("ascii")[len(self.qdos_name(self.drive, matched.parent)) + 1:])
         if dest == old:
             return
         old_meta = self.meta_path()
-        new_meta = old_meta.with_name(dest.name + ".json")
+        new_meta = dest.parent / ".snl_headers" / (dest.name + ".json")
         if (old_meta.parent.is_symlink() or old_meta.is_symlink()
                 or (old_meta.exists() and not old_meta.is_file())):
             raise QDOSError(BN)
         # Orphan metadata must not be overwritten either. Allow a case-only
         # rename of the same entry on a case-insensitive host filesystem.
-        for entry in old_meta.parent.iterdir() if old_meta.parent.exists() else ():
+        if new_meta.parent.is_symlink():
+            raise QDOSError(BN)
+        for entry in new_meta.parent.iterdir() if new_meta.parent.exists() else ():
             if entry.name.lower() == new_meta.name.lower() and entry != old_meta:
                 raise QDOSError(EX)
+        if old_meta.exists():
+            new_meta.parent.mkdir(exist_ok=True)
         old.rename(dest)
         try:
             if old_meta.exists():
@@ -386,10 +471,89 @@ class Session:
                 dest.rename(old)
             except OSError:
                 # Keep subsequent operations pointed at the actual payload.
-                self.path, self.name = dest, name
+                self.path, self.name = dest, self.qdos_name(self.drive, dest)
                 raise
             raise
-        self.path, self.name = dest, name
+        self.path, self.name = dest, self.qdos_name(self.drive, dest)
+
+    def make_directory(self, key):
+        self.require_file(writing=True)
+        if key != 0 or self.file_size() != 0 or self.payload_base:
+            raise QDOSError(BP)
+        old = self.path
+        dest = old.with_name(old.name[:-1] if old.name.endswith("_") else old.name)
+        if not dest.name or dest.name.startswith("."):
+            raise QDOSError(BN)
+        other = self.match_entry(dest.parent, dest.name)
+        if other is not None and other != old:
+            raise QDOSError(EX)
+        old_meta = self.meta_path()
+        new_meta = dest.parent / ".snl_headers" / (dest.name + ".json")
+        if old_meta.parent.is_symlink() or old_meta.is_symlink() or new_meta.is_symlink():
+            raise QDOSError(BN)
+        if new_meta != old_meta and new_meta.exists():
+            raise QDOSError(EX)
+        prefix = dest.name + "_"
+        candidates = []
+        seen = set()
+        for entry in old.parent.iterdir():
+            if entry == old or not entry.name.lower().startswith(prefix.lower()):
+                continue
+            suffix = entry.name[len(prefix):]
+            if (not suffix or suffix.startswith(".") or not suffix.isascii()
+                    or entry.is_symlink() or not (entry.is_file() or entry.is_dir())):
+                raise QDOSError(BN)
+            if suffix.lower() in seen:
+                raise QDOSError(BN)
+            seen.add(suffix.lower())
+            meta = entry.parent / ".snl_headers" / (entry.name + ".json")
+            if meta.is_symlink() or (meta.exists() and not meta.is_file()):
+                raise QDOSError(BN)
+            candidates.append((entry, suffix, meta))
+        self.flush()
+        original_header = self.header[:]
+        original_name = self.name
+        original_mode = self.mode
+        moved = []
+        created = removed = False
+        self.file.close()
+        self.file = None
+        try:
+            old.unlink()
+            removed = True
+            dest.mkdir()
+            created = True
+            for entry, suffix, meta in candidates:
+                target = dest / suffix
+                entry.rename(target)
+                moved.append((entry, target))
+                if meta.exists():
+                    target_meta = dest / ".snl_headers" / (suffix + ".json")
+                    target_meta.parent.mkdir(exist_ok=True)
+                    meta.rename(target_meta)
+                    moved.append((meta, target_meta))
+            if old_meta != new_meta and old_meta.exists():
+                old_meta.rename(new_meta)
+                moved.append((old_meta, new_meta))
+            # Reopen as the directory channel required by IOF.MKDR.
+            return self.open_directory(self.drive, self.qdos_name(self.drive, dest))
+        except Exception:
+            if self.file is not None:
+                self.file.close()
+                self.file = None
+            for before, after in reversed(moved):
+                after.rename(before)
+            if created:
+                internal = dest / ".snl_headers"
+                if internal.exists():
+                    internal.rmdir()
+                dest.rmdir()
+            if removed:
+                old.touch(exist_ok=False)
+            self.path, self.name, self.mode = old, original_name, original_mode
+            self.header = original_header
+            self.file = old.open("r+b", buffering=0)
+            raise
 
     def truncate(self, offset):
         self.require_file(writing=True)
@@ -508,7 +672,7 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
         names = {0x11: "OPEN", 0x12: "READ", 0x13: "WRITE", 0x04: "CLOSE",
                  0x15: "READ HEADER", 0x16: "SET HEADER", 0x17: "FLUSH", 0x18: "MEDIUM INFO",
                  0x19: "FILE DATE", 0x1C: "FILE VERSION", 0x1D: "EXTENDED INFO",
-                 0x1E: "RENAME", 0x1F: "TRUNCATE"}
+                 0x1E: "RENAME", 0x1F: "TRUNCATE", 0x20: "MAKE DIRECTORY"}
     if trace:
         print(f"RX command=${cmd:02X} {names.get(cmd, 'UNKNOWN')}", flush=True)
     if cmd == 0x11:
@@ -540,6 +704,12 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
                 reply = status(0 if actual == count else DF) + struct.pack(">H", actual)
         except (OSError, ValueError, QDOSError) as exc:
             reply = status(error_code(exc)) + b"\x00\x00"
+    elif cmd == 0x20:
+        key = struct.unpack(">I", read_exact(port, 4))[0]
+        try:
+            reply = status(0) + struct.pack(">I", session.make_directory(key))
+        except (OSError, ValueError, UnicodeError, KeyError, QDOSError) as exc:
+            reply = status(error_code(exc))
     elif cmd in (0x1E, 0x1F):
         if cmd == 0x1E:
             length = read_exact(port, 1)[0]

@@ -519,3 +519,8 @@ request/reply layouts, date/version semantics and daemon compatibility.
 
 The source adds RENAME ($1E) and TRUNCATE ($1F). See the
 [protocol and hardware test plan](RENAME_TRUNCATE.md).
+
+## V2.31 directory candidate
+
+The source adds MAKE DIRECTORY ($20) and nested name resolution. See
+[Level-2 directory behavior and tests](LEVEL2_DIRECTORIES.md).

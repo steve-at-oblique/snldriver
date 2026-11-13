@@ -1,10 +1,15 @@
 # Documentation
 
-Start with the [project README](../README.md) for the V2.30 release binary
+Start with the [project README](../README.md) for the V2.31 release binary
 and tested operations. Run commands from the repo root unless a guide
 explicitly says otherwise.
 
+Current source and release binary are V2.31.
+
 ## Practical guides
+
+- [V2.31 directory tests](LEVEL2_DIRECTORIES.md): nested paths, MAKE_DIR,
+  prefix adoption, metadata moves and QL Unzip without `-j`.
 
 - [V2.30 rename/truncate test plan](RENAME_TRUNCATE.md): payload and sidecar
   renaming, collisions, cache invalidation and truncation/append tests.

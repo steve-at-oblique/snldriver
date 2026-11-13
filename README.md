@@ -5,13 +5,12 @@ use a Linux computer as external file storage over a serial or USB serial
 connection. Load, save and run files directly from Linux directories using
 familiar QL commands. SNL uses SER2 on the QL and a Python daemon on Linux.
 
-**V2.30:** `SNLdriver_asm` includes with RENAME and
-TRUNCATE, plus the V2.29 dates, versions and extended medium information.
-See the [hardware test plan](docs/RENAME_TRUNCATE.md).
-The supplied binary is the tested V2.30 release.
+**V2.31** adds Level-2 directories.
+See the [directory hardware test plan](docs/LEVEL2_DIRECTORIES.md).
+The supplied binary is the hardware-tested V2.31 release.
 
-The release binary is [snldriver230_bin](bin/snldriver230_bin), assembled with
-Talent/Quanta Assembler 2.02 from the V2.30 source. Functional regression
+The release binary is [snldriver231_bin](bin/snldriver231_bin), assembled with
+Talent/Quanta Assembler 2.02 from the V2.31 source. Functional regression
 tests passed on a stock 128K QL running QDOS and on QIMSI Gold USB running
 SMSQ/E. Assembly on both systems produced identical binaries. Minerva remains
 unverified for this release.
@@ -34,7 +33,7 @@ workflows. The QL can assemble SNL itself and save its new binary through SNL.
 ## Repository layout
 
 ```text
-bin/              Release binary (snldriver230_bin)
+bin/              Release binary (snldriver231_bin)
 SNLdriver_asm      Self-contained QL assembly source
 snl_serial         Linux serial filesystem daemon
 snl_config.json    Shareable configuration with relative drive paths
@@ -99,7 +98,7 @@ Restart the daemon after config changes.
 
 ## QL installation and use
 
-Use `bin/snldriver230_bin` (4,592 bytes) with the matching updated daemon.
+Use `bin/snldriver231_bin` (4,698 bytes) with the matching updated daemon.
 The self-contained source assembles with Talent/Quanta 2.02.
 Load it into reserved memory and install it with CALL, not EXEC. See the
 [binary serial bootstrap guide](docs/BINARY_BOOTSTRAP.md) for a direct LBYTES
@@ -140,9 +139,10 @@ been used on hardware; WCOPY failed during testing and remains unverified.
 ## Current limits
 
 - One open SNL channel across all drives; SNL-to-SNL copying is unsupported.
-- Flat drive directories; DIR can filter a filename prefix but cannot traverse
-  subdirectories. Map a host subdirectory as another drive instead.
-- No format or subdirectory creation. V2.30 adds rename and truncate;
+- Real subdirectories are supported; see [directory behavior and hardware
+  results](docs/LEVEL2_DIRECTORIES.md).
+- No format. QDOS paths remain limited to 36 characters after the device
+  prefix. V2.30 adds rename and truncate;
   all seven hardware test steps passed under SMSQ/E and on stock QDOS with
   Toolkit II. See [V2.30 results](docs/RENAME_TRUNCATE.md).
   V2.29 metadata hardware results are recorded
@@ -165,13 +165,13 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -q
 The automated tests cover the daemon and an interpreter of the actual assembly source,
 including transport errors, register/stack handling and alignment. The five
 profiling-specific tests are retained with V2.24 in the diagnostic checkpoint.
-They do not replace Talent assembly or physical serial testing. V2.30 has been
+They do not replace Talent assembly or physical serial testing. V2.31 has been
 assembled and tested on the stock 128K QL and QIMSI Gold USB under SMSQ/E;
 both assemblies produced identical binaries. Hardware coverage includes BASIC
 load/save, existing-file handling, binary integrity and memory guards,
 directories and prefix filtering, empty directories, missing files, executable
 loading and assembling the driver through SNL. Stock QL testing also confirmed
-recovery after starting a missing daemon. Minerva is unverified for V2.30.
+recovery after starting a missing daemon. Minerva is unverified for V2.31.
 
 Start with the [documentation index](docs/README.md) for hardware tests,
 bootstrap instructions, protocol details and historical development notes.

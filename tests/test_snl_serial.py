@@ -128,9 +128,10 @@ class SerialTests(unittest.TestCase):
         self.assertFalse((self.root / "test_bas").exists())
         self.assertFalse((self.root / ".snl_headers").exists())
 
-    def test_delete_refuses_directories_paths_and_symlink_metadata(self):
+    def test_delete_refuses_paths_and_symlink_metadata(self):
         (self.root / "folder").mkdir()
-        for name in (b"folder", b"../escape", b".SNL_HEADERS"):
+        self.assertEqual(self.open(name=b"folder", mode=255), b"\x00")
+        for name in (b"../escape", b".SNL_HEADERS"):
             self.assertEqual(self.open(name=name, mode=255), snl.status(snl.BN))
         (self.root / "test_bas").write_bytes(b"keep")
         (self.root / ".snl_headers").mkdir()
@@ -212,17 +213,18 @@ class SerialTests(unittest.TestCase):
         (self.root / ".DS_Store").write_bytes(b"hidden")
         (self.root / ("x" * 37)).write_bytes(b"long")
         (self.root / "link").symlink_to(self.root / "empty")
-        self.assertEqual(self.open(name=b"", mode=4), b"\x00" + struct.pack(">I", 192))
+        self.assertEqual(self.open(name=b"", mode=4), b"\x00" + struct.pack(">I", 256))
         reply = self.read(0, 512)
-        self.assertEqual(reply[:3], b"\xf6\x00\xc0")
-        records = [reply[3+i:3+i+64] for i in range(0, 192, 64)]
+        self.assertEqual(reply[:3], b"\xf6\x01\x00")
+        records = [reply[3+i:3+i+64] for i in range(0, 256, 64)]
         names = [r[16:16+int.from_bytes(r[14:16], "big")] for r in records]
-        self.assertEqual(names, [b"Assembler", b"empty", b"Mixed_Bin"])
-        self.assertEqual([int.from_bytes(r[:4], "big") for r in records], [len(payload)+64, 64, 67])
+        self.assertEqual(names, [b"Assembler", b"empty", b"Mixed_Bin", b"subdirectory"])
+        self.assertEqual([int.from_bytes(r[:4], "big") for r in records], [len(payload)+64, 64, 67, 64])
         self.assertEqual(records[0][4:14], wrapper[20:30])
         self.assertEqual(records[2][4:14], metadata)
+        self.assertEqual(records[3][5], 255)
         self.assertEqual(self.request(b"\x15")[6], 255)
-        self.assertEqual(self.read(192, 64), b"\xf6\x00\x00")
+        self.assertEqual(self.read(256, 64), b"\xf6\x00\x00")
         self.assertEqual(self.request(b"\x04"), b"\x00")
 
     def test_directory_snapshot_spans_blocks_and_refreshes_on_reopen(self):

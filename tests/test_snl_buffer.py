@@ -168,14 +168,14 @@ class CacheCPU:
     def transmit(self, data):
         self.wire.extend(data)
         cmd = self.wire[0]
-        assert cmd in (0x11, 0x12, 0x13, 0x15, 0x18, 0x19, 0x1C, 0x1D, 0x1E, 0x1F, ord("~")), self.wire.hex()
+        assert cmd in (0x11, 0x12, 0x13, 0x15, 0x18, 0x19, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, ord("~")), self.wire.hex()
         if cmd == ord("~"):
             count, length = 0, 22
         elif cmd == 0x1E:
             if len(self.wire) < 2:
                 return
             count, length = 0, 2 + self.wire[1]
-        elif cmd in (0x19, 0x1C, 0x1D, 0x1F):
+        elif cmd in (0x19, 0x1C, 0x1D, 0x1F, 0x20):
             count, length = 0, 6 if cmd == 0x19 else 5
         elif cmd == 0x11:
             if len(self.wire) < 4:
@@ -573,6 +573,43 @@ class BufferTests(unittest.TestCase):
         cpu.truncate_reply = 0
         self.assertEqual(cpu.run("io_trnc")[0], -13)
         self.assertEqual(cpu.field("fs_eblok"), 3)
+
+    def test_make_directory_handler_updates_mode_eof_and_cache(self):
+        cpu = self.cpu(b"")
+        cpu.reg.update(d1=0)
+        cpu.field("snl_len", 12, 2)
+        self.assertEqual(cpu.run("io_mkdr")[0], 0)
+        self.assertEqual(cpu.field("snl_mode", width=1), 4)
+        self.assertEqual(cpu.field("fs_acces", width=1), 4)
+        self.assertEqual(cpu.field("fs_nblok"), 0)
+        self.assertEqual(cpu.field("fs_eblok"), 0)
+        self.assertEqual(cpu.field("snl_len", width=2), 0)
+        self.assertEqual(cpu.reg["d1"], 0)
+        self.assertEqual(cpu.reg["a1"], 0x4000)
+        self.assertTrue((self.root / "test_bas").is_dir())
+
+    def test_make_directory_rejection_leaves_driver_state(self):
+        cpu = self.cpu(b"nonempty")
+        cpu.reg.update(d1=0)
+        self.assertEqual(cpu.run("io_mkdr")[0], snl.BP)
+        self.assertEqual(cpu.field("snl_mode", width=1), 0)
+        self.assertEqual(cpu.field("fs_eblok"), 8)
+        cpu = self.cpu(b"")
+        cpu.reg.update(d1=0x12345678)
+        self.assertEqual(cpu.run("io_mkdr")[0], 0)
+        self.assertEqual(cpu.reg["d1"], 0x12345678)
+        self.assertEqual(cpu.requests[-1], b"\x20" + bytes(4))
+
+    def test_make_directory_readonly_and_short_reply(self):
+        cpu = self.cpu(b"")
+        cpu.reg.update(d1=0)
+        cpu.field("snl_mode", 1, 1)
+        self.assertEqual(cpu.run("io_mkdr")[0], snl.RO)
+        self.assertFalse(cpu.requests)
+        cpu.field("snl_mode", 0, 1)
+        cpu.truncate_reply = 3
+        self.assertEqual(cpu.run("io_mkdr")[0], -13)
+        self.assertEqual(cpu.field("snl_mode", width=1), 0)
 
     def test_loader_character_reads_need_four_requests(self):
         payload = LOADER_FIXTURE.read_bytes()
