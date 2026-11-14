@@ -8,15 +8,17 @@ using familiar QL commands. SNL uses SER2 on the QL and a Python daemon on
 the host computer. Hardware testing so far has used a Linux host; Windows
 and Raspberry Pi host setups have not yet been validated for this release.
 
-**V2.31** adds Level-2 directories.
-See the [directory hardware test plan](docs/LEVEL2_DIRECTORIES.md).
-The supplied binary is the hardware-tested V2.31 release.
+**V2.33** supports multiple channels,
+a separate 512-byte cache per channel, and daemon channel statistics. See the
+[multi-channel hardware test plan](docs/MULTIPLE_CHANNELS.md).
+The supplied binary is the hardware-tested V2.33 release, including Level-2
+directories. See the [directory test results](docs/LEVEL2_DIRECTORIES.md).
 
-The release binary is [snldriver231_bin](bin/snldriver231_bin), assembled with
-Talent/Quanta Assembler 2.02 from the V2.31 source. Functional regression
+The release binary is [snldriver233_bin](bin/snldriver233_bin), assembled with
+Talent/Quanta Assembler 2.02 from the V2.33 source. Functional regression
 tests passed on a stock 128K QL running QDOS and on QIMSI Gold USB running
-SMSQ/E. Assembly on both systems produced identical binaries. Minerva remains
-unverified for this release.
+SMSQ/E; stock-QL Unzip and INCLUDE assembly tests were limited by memory.
+Minerva remains unverified for this release.
 
 V2.28 includes bulk transfers, aligned read-cache copies and batched READ
 headers, with 512-byte payloads and no profiling instrumentation. It also fixes
@@ -36,7 +38,7 @@ workflows. The QL can assemble SNL itself and save its new binary through SNL.
 ## Repository layout
 
 ```text
-bin/              Release binary (snldriver231_bin)
+bin/              Release binary (snldriver233_bin)
 SNLdriver_asm      Self-contained QL assembly source
 snl_serial         Python serial filesystem daemon
 snl_config.json    Shareable configuration with relative drive paths
@@ -137,11 +139,14 @@ port name.
 The daemon reserves its host serial device; stop it before switching
 configurations or using the same device for bootstrapping.
 
+Set `channel_stats` to true (the default) for OPEN/CLOSE events and current/peak
+channel counts with V2.33. See [statistics and workload tests](docs/MULTIPLE_CHANNELS.md).
+
 Restart the daemon after config changes.
 
 ## QL installation and use
 
-Use `bin/snldriver231_bin` (4,698 bytes) with the matching updated daemon.
+Use `bin/snldriver233_bin` (4,950 bytes) with the matching updated daemon.
 The self-contained source assembles with Talent/Quanta 2.02.
 Load it into reserved memory and install it with CALL, not EXEC. See the
 [binary serial bootstrap guide](docs/BINARY_BOOTSTRAP.md) for a direct LBYTES
@@ -178,11 +183,14 @@ extracted by QL Unzip in sQLux to be used by the physical QL.
 
 Use normal QDOS/Toolkit II COPY to preserve headers when transferring a file
 between Microdrive and SNL. COPY_N omits headers. Individual file copying has
-been used on hardware; WCOPY failed during testing and remains unverified.
+been used on hardware. V2.33 multi-channel source addresses the restriction
+that previously prevented WCOPY from holding a directory and file open
+simultaneously. SNL-to-SNL COPY and WCOPY passed hardware testing.
 
 ## Current limits
 
-- One open SNL channel across all drives; SNL-to-SNL copying is unsupported.
+- Multiple channels and SNL-to-SNL copying are supported. Tested workloads
+  peaked at three channels for WCOPY and two for Unzip/assembly with includes.
 - Real subdirectories are supported; see [directory behavior and hardware
   results](docs/LEVEL2_DIRECTORIES.md).
 - No format. QDOS paths remain limited to 36 characters after the device
@@ -212,13 +220,13 @@ behaviors such as symlinks and may need platform-specific permissions.
 The automated tests cover the daemon and an interpreter of the actual assembly source,
 including transport errors, register/stack handling and alignment. The five
 profiling-specific tests are retained with V2.24 in the diagnostic checkpoint.
-They do not replace Talent assembly or physical serial testing. V2.31 has been
+They do not replace Talent assembly or physical serial testing. V2.33 has been
 assembled and tested on the stock 128K QL and QIMSI Gold USB under SMSQ/E;
-both assemblies produced identical binaries. Hardware coverage includes BASIC
-load/save, existing-file handling, binary integrity and memory guards,
+see the [multi-channel results](docs/MULTIPLE_CHANNELS.md) for platform limits.
+Hardware coverage includes BASIC load/save, existing-file handling, binary integrity and memory guards,
 directories and prefix filtering, empty directories, missing files, executable
 loading and assembling the driver through SNL. Stock QL testing also confirmed
-recovery after starting a missing daemon. Minerva is unverified for V2.31.
+recovery after starting a missing daemon. Minerva is unverified for V2.33.
 
 Start with the [documentation index](docs/README.md) for hardware tests,
 bootstrap instructions, protocol details and historical development notes.

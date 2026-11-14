@@ -31,7 +31,7 @@
 ; Applies to Steve Jennen's original contributions. Existing third-party
 ; copyright and redistribution notices are retained at the end of this file.
 ;
-; Version       : 2.31 (Level-2 directories)
+; Version       : 2.33 (multiple channels and daemon statistics)
 ; Wire protocol : SNL v2, with readiness handshake and directory support
 ; Target        : Sinclair QL / Motorola 68000 instruction set
 ; Assembler     : Talent/Quanta Assembler 2.02
@@ -141,7 +141,7 @@ qimsi_id equ      21                        ; SMSQ/E sys.mqig: QIMSI Gold
 
 sv_fslst equ      $140                      ; pointer to list of file channel definitions
 
-; SYM output disabled: single open-file SNL build
+; SYM output disabled for builds over SNL
 
 ; ----------------------------------------------------------------------------
 ; Entry point and installation banner
@@ -163,7 +163,7 @@ boot_err bsr      dbg_boot
          rts
 
 banner   dc.w     67                        ; text bytes only; exclude Talent alignment padding
-         dc.b     'SNL Device driver V2.31 - BSD-2-Clause',10
+         dc.b     'SNL Device driver V2.33 - BSD-2-Clause',10
          dc.b     'Copyright 2026 Steve Jennen',10
 ban_end  equ      *
          dc.b     0                         ; word alignment
@@ -172,7 +172,7 @@ ban_end  equ      *
 ; SNL per-channel state
 ; ----------------------------------------------------------------------------
 
-; Per-channel state in $70..$97, within the common $70..$9F spare area.
+; Per-channel state in $70..$9B, within the common $70..$9F spare area.
 ; SMSQ/E owns $58..$6F: never store private state there. No slave blocks.
 
 snl_chid equ      fs_spare                  ; long: permanent serial channel ID
@@ -186,10 +186,11 @@ snl_cnt  equ      fs_spare+16               ; word: last READ/WRITE reply count
 snl_call equ      fs_spare+18               ; byte: original file I/O operation
 snl_serp equ      fs_spare+20               ; long: permanent serial CDB pointer
 snl_txp  equ      fs_spare+24               ; long: validated ROM serial transmit task
-snl_buf  equ      fs_spare+28               ; long: read-ahead buffer at linkage+$500
+snl_buf  equ      fs_spare+28               ; long: per-channel 512-byte heap buffer
 snl_base equ      fs_spare+32               ; long: payload offset of cached first byte
 snl_len  equ      fs_spare+36               ; word: valid cached bytes, 0..512
 snl_err  equ      fs_spare+38               ; word: deferred result at end of cache
+snl_hand equ      fs_spare+40               ; long: daemon session handle
 snl_time equ      3                         ; per-byte RTC deadline in seconds
 
 ; fs_nblok and fs_eblok are FLAT payload position/length, no header offset.
@@ -202,7 +203,7 @@ snl_time equ      3                         ; per-byte RTC deadline in seconds
 
 init     movem.l  d1-d3/a0-a4,-(a7)
          moveq    #$18,d0                   ; MT.ALCHP
-         move.l   #$700,d1                  ; linkage, private stack, 512-byte read buffer
+         move.l   #$500,d1                  ; linkage and private stack; caches allocated per OPEN
          moveq    #0,d2                     ; owned by job zero
          moveq    #0,d3
          trap     #1
@@ -390,10 +391,12 @@ ip_no    moveq    #err.ni,d0
 
 ; OPEN: A0=CDB, A1=PDB, A3=linkage, A6=sysvars. Preserve D4+,
 ; A0/A1/A3/A6. QDOS supplies fs_fname and fs_acces in the CDB.
-; 11 drive mode length name -> status, then size.l for successful OPEN.
+; 21 drive mode length name -> status, handle.l and size.l on OPEN.
 ; Mode $FF is DELETE: status only, no installed channel or file count.
 
 dd_mdvop move.l   a2,-(a7)
+         tas      $4A(a3)                  ; serialize before switching shared stack
+         bne      ent_busy
          tst.b    $60(a3)
          bne      op_sys
          lea      $4FC(a3),a2               ; OPEN supplies assumed linkage base
@@ -414,10 +417,8 @@ op_main  movem.l  d4-d7/a0-a1/a3-a6,-(a7)
          clr.l    snl_base(a5)
          clr.w    snl_len(a5)
          clr.w    snl_err(a5)
-         lea      $500(a3),a2
-         move.l   a2,snl_buf(a5)
-         tst.b    $48(a3)                   ; shared serial protocol has no handles
-         bne      op_iu
+         clr.l    snl_buf(a5)
+         clr.l    snl_hand(a5)
          cmpi.b   #-1,fs_acces(a5)          ; QDOS DELETE enters through directory OPEN
          beq      op_valid
          cmpi.b   #io.dir,fs_acces(a5)
@@ -434,9 +435,13 @@ op_nlen  cmpi.w   #fs.nmlen,d6
          move.l   $4C(a3),snl_chid(a5)      ; reuse installation-time transport
          move.l   $50(a3),snl_serp(a5)
          move.l   $54(a3),snl_txp(a5)
-         bsr      snl_rdy
+         cmpi.b   #-1,snl_mode(a5)
+         beq      op_ready
+         bsr      snl_allc
          bne      op_err
-         moveq    #$11,d1
+op_ready bsr      snl_rdy
+         bne      op_err
+         moveq    #$21,d1
          bsr      snl_send
          bne      op_err
          move.l   d5,d1
@@ -463,6 +468,9 @@ op_reply bsr      snl_stat
          beq      op_ret                    ; QDOS frees the temporary DELETE CDB
          bsr      snl_getl
          bne      op_err
+         move.l   d1,snl_hand(a5)
+         bsr      snl_getl
+         bne      op_err
          tst.l    d1
          bmi      op_bad
          move.l   d1,fs_eblok(a5)
@@ -473,11 +481,24 @@ op_reply bsr      snl_stat
 ; QDOS increments FS_FILES itself. Present this as an exclusive CDB so
 ; QDOS cannot clone a shared CDB (which would alias the serial ID and reset
 ; its file position to the microdrive header offset $40). Enforce the
-; originally requested read-only mode separately through snl_mode.
+; originally requested read-only mode separately through snl_mode. Directory
+; channels retain their proper mode so scans do not masquerade as exclusive files.
 
          move.b   #io.old,fs_acces(a5)
-         move.w   #1,fs_filnr(a5)
-         st       $48(a3)                   ; one active file in driver linkage
+         cmpi.b   #io.dir,snl_mode(a5)
+         bne      op_fnum
+         move.b   #io.dir,fs_acces(a5)
+; The requested directory name may be a wildcard prefix identical to a file.
+; QDOS rejects NEW/OVER against that name while the scan is open. Give each
+; scan a reserved, unique CDB identity; daemon headers retain the real name.
+         move.w   #14,fs_fname(a5)
+         lea      fs_fname+2(a5),a1
+         move.l   #$2E534E4C,(a1)+           ; .SNL
+         move.w   #$5F44,(a1)+               ; _D
+         move.l   snl_hand(a5),d4
+         bsr      hs_hex
+op_fnum  move.w   snl_hand+2(a5),fs_filnr(a5)
+         addq.w   #1,$48(a3)                ; count installed channels
          moveq    #0,d0
          bra      op_ret
 op_bad   bsr      snl_bad
@@ -497,7 +518,11 @@ op_ni    bsr      dbg_open
          moveq    #err.ni,d0
          bra      op_ret
 op_bn    moveq    #err.bn,d0
-op_ret   movem.l  (a7)+,d4-d7/a0-a1/a3-a6
+op_ret   tst.l    d0
+         beq      op_clean
+         bsr      snl_free
+op_clean clr.b    $4A(a3)
+         movem.l  (a7)+,d4-d7/a0-a1/a3-a6
          bra      snl_exit
 
 ; ----------------------------------------------------------------------------
@@ -509,6 +534,8 @@ op_ret   movem.l  (a7)+,d4-d7/a0-a1/a3-a6
 
 dd_mdvio move.l   a2,-(a7)
          move.l   ch_drivr(a0),a2
+         tas      $32(a2)                  ; linkage+$4A
+         bne      ent_busy
          tst.b    $48(a2)                   ; linkage+$60
          bne      io_sys           ; points at linkage+$18
          lea      $4E4(a2),a2               ; private stack top minus saved-SP long
@@ -628,7 +655,7 @@ io_top   move.l   fs_eblok(a5),d1
 io_eof   moveq    #err.ef,d0
          bra      io_ret
 io_flush moveq    #$17,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_ret
          bsr      snl_stat
          bra      io_ret
@@ -637,7 +664,7 @@ io_heads cmpi.b   #io.share,snl_mode(a5)
          cmpi.b   #io.dir,snl_mode(a5)
          beq      io_ro
          moveq    #$16,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_ret
          move.l   a1,a4
          moveq    #13,d6
@@ -655,7 +682,7 @@ io_hsend move.b   (a4)+,d1
 ; Copy exactly ten raw medium-name bytes and advance A1 by ten.
 
 io_info  moveq    #$18,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_ret
          bsr      snl_stat
          bne      io_ret
@@ -695,7 +722,7 @@ io_rnam cmpi.b   #io.share,snl_mode(a5)
          bhi      io_rbad
          move.l   a1,a4
          moveq    #$1E,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_ret
          move.l   d5,d1
          bsr      snl_send
@@ -727,7 +754,7 @@ io_trnc cmpi.b   #io.share,snl_mode(a5)
          beq      io_ro
          move.l   fs_nblok(a5),d5
          moveq    #$1F,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_ret
          move.l   d5,d1
          bsr      snl_putl
@@ -745,7 +772,7 @@ io_mkdr cmpi.b   #io.share,snl_mode(a5)
          beq      io_ro
          move.l   d1,d5                    ; preserve caller value; no option keys used
          moveq    #$20,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_kerr
          moveq    #0,d1
          bsr      snl_putl
@@ -772,7 +799,7 @@ io_vers moveq    #$1C,d7
 io_xinf moveq    #$1D,d7
 io_meta move.l   d1,d5
          move.l   d7,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_merr
          move.l   d5,d1
          bsr      snl_putl
@@ -817,7 +844,7 @@ io_headr moveq    #0,d5
          bls      io_hlen
          moveq    #64,d5
 io_hlen  moveq    #$15,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      io_ret
          bsr      snl_stat
          bne      io_ret
@@ -861,7 +888,9 @@ io_diag  bsr      dbg_fail
          bsr      dbg_rhi
          bsr      dbg_rx
          bsr      dbg_ser
-io_rest  movem.l  (a7)+,d2-d7/a0/a2-a6
+io_rest  move.l   ch_drivr(a5),a2
+         clr.b    $32(a2)
+         movem.l  (a7)+,d2-d7/a0/a2-a6
          bra      snl_exit
 
 ; ----------------------------------------------------------------------------
@@ -893,7 +922,7 @@ x_next   tst.l    d5
 x_count  moveq    #$13,d1                   ; WRITE command
 x_req    move.b   #1,snl_phas(a5)
          clr.w    snl_rx(a5)
-         bsr      snl_send
+         bsr      snl_cmd
          bne      x_ret
          move.l   fs_nblok(a5),d1
          bsr      snl_putl
@@ -951,7 +980,7 @@ x_ret    move.l   d4,d1
 ; Read-ahead cache
 ; ----------------------------------------------------------------------------
 
-; Read/line operations use one buffer shared by the single open SNL file.
+; Read/line operations use the current channel's private 512-byte buffer.
 ; Cache offsets are independent of the logical file position. Seeking within
 ; the window reuses it; seeking outside refills at the requested position.
 ; EOF/errors accompanying prefetched data are deferred until that data has
@@ -1057,14 +1086,16 @@ snl_fill movem.l  d2-d7/a1-a4,-(a7)
          move.l   d1,snl_base(a5)
          move.b   #1,snl_phas(a5)
          clr.w    snl_rx(a5)
-; Seven wire bytes start at scratch+1, keeping the long/word fields even.
-; Send exactly those seven bytes: no padding byte enters the protocol.
+; Emit handled READ prefix, then six aligned offset/count bytes in a batch.
 
          move.b   #$12,1(a7)
          move.l   snl_base(a5),2(a7)
          move.w   #512,6(a7)
-         lea      1(a7),a1
-         moveq    #7,d2
+         moveq    #$12,d1
+         bsr      snl_cmd
+         bne      cf_ret
+         lea      2(a7),a1
+         moveq    #6,d2
          bsr      snl_bput
          bne      cf_ret
          move.b   #2,snl_phas(a5)
@@ -1277,7 +1308,8 @@ bp_ret   move.l   d5,d1
 ; Readiness is a non-destructive ASCII probe before OPEN/DELETE only.
 ; Request: ~SNL? + 16 A..P nibbles + LF. Reply changes ? to !.
 ; Token = installation RTC epoch + persistent attempt counter. Delayed
-; replies from earlier attempts cannot match. No file request is sent until
+; replies from earlier attempts cannot match. Existing sessions survive each
+; normal OPEN; the daemon recognizes a reset by epoch/counter. No request until
 ; the whole current reply matches; a timeout leaves the next OPEN retryable.
 ; Linkage+$58 epoch / +$5C counter are outside stack and cache storage.
 
@@ -1383,6 +1415,8 @@ snl_poll movem.l  d2-d7/a0-a6,-(a7)
 
 dd_mdvcl move.l   a2,-(a7)
          move.l   ch_drivr(a0),a2
+         tas      $32(a2)
+         bne      ent_busy
          tst.b    $48(a2)                   ; linkage+$60
          bne      cl_sys           ; points at linkage+$18
          lea      $4E4(a2),a2               ; private stack top minus saved-SP long
@@ -1394,16 +1428,19 @@ cl_sys   move.l   a7,a2
          bra      cl_main
 cl_main  movem.l  d4-d7/a3-a6,-(a7)
          move.l   a0,a5
+         move.l   ch_drivr(a5),a2
+         move.l   a2,-(a7)                 ; retain linkage through CDB release
          moveq    #err.te,d0
          tst.b    snl_dead(a5)
          bne      cl_done
          moveq    #4,d1
-         bsr      snl_send
+         bsr      snl_cmd
          bne      cl_done
          bsr      snl_stat
 cl_done  move.l   d0,d5
          move.l   ch_drivr(a5),a2
-         clr.b    $30(a2)                   ; clear driver's one-file lock
+         subq.w   #1,$30(a2)                ; installed channel count
+         bsr      snl_free
          move.l   snl_pdb(a5),a2
          subq.b   #1,fs_files(a2)
          lea      fs_next(a5),a0
@@ -1413,6 +1450,8 @@ cl_done  move.l   d0,d5
          move.l   a5,a0
          move.w   $C2,a4                    ; MM.RECHP / MEM.RCHP
          jsr      (a4)
+         move.l   (a7)+,a2
+         clr.b    $32(a2)
          move.l   d5,d0
          movem.l  (a7)+,d4-d7/a3-a6
          bra      snl_exit
@@ -1427,6 +1466,49 @@ cl_done  move.l   d0,d5
 
 snl_exit move.l   (a7),a7
          move.l   (a7)+,a2
+         tst.l    d0
+         rts
+
+ent_busy move.l   (a7)+,a2
+         moveq    #err.nc,d0                ; no bytes sent: QDOS may retry safely
+         rts
+
+; Heap helpers preserve driver state and the original error on release.
+snl_allc movem.l d1-d3/a0-a3,-(a7)
+         moveq    #$18,d0
+         move.l   #512,d1
+         moveq    #0,d2
+         moveq    #0,d3
+         trap     #1
+         tst.l    d0
+         bne      sa_ret
+         move.l   a0,snl_buf(a5)
+sa_ret   movem.l  (a7)+,d1-d3/a0-a3
+         tst.l    d0
+         rts
+snl_free movem.l  d0-d3/a0-a3,-(a7)
+         move.l   snl_buf(a5),d0
+         beq      sf_ret
+         move.l   d0,a0
+         clr.l    snl_buf(a5)
+         moveq    #$19,d0
+         trap     #1
+sf_ret   movem.l  (a7)+,d0-d3/a0-a3
+         tst.l    d0
+         rts
+
+; Start one handled request: $22, handle.l, original command.b.
+snl_cmd  movem.l  d2,-(a7)
+         move.l   d1,d2
+         moveq    #$22,d1
+         bsr      snl_send
+         bne      sc_ret
+         move.l   snl_hand(a5),d1
+         bsr      snl_putl
+         bne      sc_ret
+         move.l   d2,d1
+         bsr      snl_send
+sc_ret   movem.l  (a7)+,d2
          tst.l    d0
          rts
 

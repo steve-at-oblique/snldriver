@@ -24,6 +24,9 @@ class StackPolicyTests(unittest.TestCase):
         start = source.index("snl_exit move.l")
         end = source.index("; ---", start)
         wrappers.append(source[start:end].replace("snl_exit", "stk_exit"))
+        start = source.index("ent_busy move.l")
+        end = source.index("; Heap helpers", start)
+        wrappers.append(source[start:end])
         cpu.code, cpu.labels = [], {}
         for line in "".join(wrappers).splitlines():
             line = line.split(";", 1)[0].rstrip()
@@ -55,6 +58,19 @@ class StackPolicyTests(unittest.TestCase):
                     self.assertEqual(cpu.reg["d1"], expected)
                     if minerva:
                         self.assertEqual(cpu.reg["d1"] & 0xFFFF8000, 0x28000)
+
+    def test_busy_entry_returns_before_switching_shared_stack_or_sending(self):
+        for entry in ("dd_mdvop", "dd_mdvio", "dd_mdvcl"):
+            with self.subTest(entry=entry):
+                cpu = self.cpu()
+                cpu.reg.update(a0=0x2000, a2=0x123456, a3=0x10000, d0=7)
+                cpu.put("4(a0)", 0x10018, 4)
+                cpu.mem[0x1004A] = 128
+                self.assertEqual(cpu.run(entry, stack_top=0x2FF00)[0], -1)
+                self.assertEqual(cpu.reg["a7"], 0x2FF00)
+                self.assertEqual(cpu.reg["a2"], 0x123456)
+                self.assertEqual(cpu.mem[0x1004A], 128)
+                self.assertFalse(cpu.requests)
 
 
 if __name__ == "__main__":

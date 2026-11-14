@@ -1,0 +1,29 @@
+10 REMark SNL V2.33 + Toolkit II or SMSQ/E; two disposable fresh names
+20 testsrc$="snl1_mc233_src": testdst$="snl1_mc233_dst"
+30 count=1537: bad=0
+40 OPEN_NEW #3,testsrc$
+50 FOR i=0 TO count-1
+60   value=i-256*INT(i/256)
+70   BPUT #3,value
+80 END FOR i
+90 CLOSE #3
+100 REMark Keep a directory channel open during an SNL-to-SNL COPY
+110 OPEN_DIR #5,snl1_
+120 COPY testsrc$ TO testdst$
+130 REMark Three active channels: directory and two independent readers
+140 OPEN_IN #3,testsrc$
+150 OPEN_IN #4,testdst$
+160 IF FLEN(#3)<>count THEN bad=bad+1
+170 IF FLEN(#4)<>count THEN bad=bad+1
+180 FOR i=0 TO count-1
+190   BGET #3,leftval
+200   BGET #4,rightval
+210   want=i-256*INT(i/256)
+220   IF leftval<>want OR rightval<>want THEN bad=bad+1
+230 END FOR i
+240 CLOSE #3
+250 CLOSE #4
+260 CLOSE #5
+270 IF bad=0 THEN PRINT "PASS: SNL-to-SNL COPY and three channels"
+280 IF bad<>0 THEN PRINT "FAIL: checks failed: ";bad
+290 REMark Successful test files may be deleted with QL DELETE

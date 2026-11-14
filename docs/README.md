@@ -1,12 +1,15 @@
 # Documentation
 
-Start with the [project README](../README.md) for the V2.31 release binary
+Start with the [project README](../README.md) for the V2.33 release binary
 and tested operations. Run commands from the repo root unless a guide
 explicitly says otherwise.
 
-Current source and release binary are V2.31.
+Current source and release binary are V2.33.
 
 ## Practical guides
+
+- [V2.33 multiple channels and statistics](MULTIPLE_CHANNELS.md): independent
+  channels, SNL-to-SNL copying, daemon counts and workload measurements.
 
 - [V2.31 directory tests](LEVEL2_DIRECTORIES.md): nested paths, MAKE_DIR,
   prefix adoption, metadata moves and QL Unzip without `-j`.

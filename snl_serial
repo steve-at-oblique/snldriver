@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import secrets
 from pathlib import Path
 import struct
 import sys
@@ -655,8 +656,208 @@ class Session:
                 self.file = None
 
 
+class PacketPort:
+    """In-memory complete request/reply adapter for the existing operations."""
+    def __init__(self, request):
+        self.input = io.BytesIO(request)
+        self.output = bytearray()
+
+    def read(self, count):
+        return self.input.read(count)
+
+    def write(self, data):
+        self.output.extend(data)
+        return len(data)
+
+
+class SessionPool:
+    """Independent open files on one serialized serial connection."""
+    def __init__(self, drives, statistics=True):
+        self.drives = drives
+        self.sessions = {}
+        self.legacy = Session(drives)
+        self.epoch = None
+        self.ready_counter = None
+        self.next_handle = secrets.randbelow(0x7FFFFFFE) + 1
+        self.statistics = statistics
+        self.peak = self.opens = self.closes = self.rejected = 0
+
+    def event(self, action, **fields):
+        if self.statistics:
+            detail = " ".join(f"{k}={v!r}" for k, v in fields.items())
+            print(f"SNL {action} {detail} active={len(self.sessions)} peak={self.peak}", flush=True)
+
+    def open(self, drive, mode, name):
+        session = Session(self.drives)
+        path = session.resolve_name(drive, name) if name else session.drive_root(drive)
+        # Directory snapshots coexist with file operations; ordinary files
+        # permit multiple shared readers but no conflicting exclusive opens.
+        if not path.is_dir() and mode != 4:
+            for opened in self.sessions.values():
+                if opened.path == path and not (opened.mode == 1 and mode == 1):
+                    raise QDOSError(IU)
+        if self.next_handle > 0xFFFFFFFF:
+            raise QDOSError(-3)
+        size = session.open(drive, mode, name)
+        handle = self.next_handle
+        self.next_handle += 1  # never reuse handles during this daemon run
+        self.sessions[handle] = session
+        self.opens += 1
+        self.peak = max(self.peak, len(self.sessions))
+        self.event("OPEN", handle=handle, drive=drive, mode=mode, file=session.name.decode("ascii"))
+        return handle, size
+
+    def close_handle(self, handle):
+        session = self.sessions.pop(handle, None)
+        if session is None:
+            raise QDOSError(-6)
+        try:
+            session.close()
+        finally:
+            self.closes += 1
+            self.event("CLOSE", handle=handle, file=session.name.decode("ascii"))
+
+    def close_all(self, reason="shutdown"):
+        # One failed flush must not prevent cleanup of the other sessions.
+        for handle in list(self.sessions):
+            try:
+                self.close_handle(handle)
+            except (OSError, ValueError, KeyError, QDOSError) as exc:
+                self.event("CLOSE ERROR", handle=handle, error=str(exc))
+        try:
+            self.legacy.close()
+        except (OSError, ValueError, KeyError, QDOSError) as exc:
+            self.event("CLOSE ERROR", handle="legacy", error=str(exc))
+        self.event("SUMMARY", reason=reason, opens=self.opens, closes=self.closes,
+                   rejected=self.rejected)
+
+    def ready(self, token):
+        epoch = token[:8]
+        counter = token[8:]
+        if self.sessions and (epoch != self.epoch or (self.ready_counter is not None
+                                                    and counter <= self.ready_counter)):
+            self.close_all("QL reset")
+        self.epoch = epoch
+        self.ready_counter = counter
+        self.legacy.close()
+
+    def delete(self, drive, name):
+        scratch = Session(self.drives)
+        path = scratch.resolve_name(drive, name)
+        if any(opened.path == path for opened in self.sessions.values()):
+            raise QDOSError(IU)
+        scratch.delete(drive, name)
+
+    def check_directory_conversion(self, session):
+        leaf = session.path.name
+        prefix = (leaf[:-1] if leaf.endswith("_") else leaf).lower() + "_"
+        for opened in self.sessions.values():
+            if (opened is not session and opened.path.parent == session.path.parent
+                    and opened.path.name.lower().startswith(prefix)):
+                raise QDOSError(IU)
+
+
+def collect_request(port, cmd):
+    """Consume a complete inner request even when its handle is invalid."""
+    if cmd in (0x04, 0x15, 0x17, 0x18):
+        body = b""
+    elif cmd == 0x16:
+        body = read_exact(port, 14)
+    elif cmd in (0x12, 0x13):
+        body = read_exact(port, 6)
+        if cmd == 0x13:
+            body += read_exact(port, int.from_bytes(body[4:6], "big"))
+    elif cmd == 0x19:
+        body = read_exact(port, 5)
+    elif cmd in (0x1C, 0x1D, 0x1F, 0x20):
+        body = read_exact(port, 4)
+    elif cmd == 0x1E:
+        body = read_exact(port, 1)
+        body += read_exact(port, body[0])
+    else:
+        raise ValueError("Unknown handled command")
+    return bytes((cmd,)) + body
+
+
+def serve_pool(port, pool, trace=False, reply_delay=0, byte_delay=0):
+    cmd = read_exact(port, 1)[0]
+    if cmd == ord("~"):
+        token = read_ready_probe(port)
+        if token is not None:
+            pool.ready(token)
+            write_reply(port, READY_REPLY + token + b"\n", reply_delay, byte_delay)
+            if trace:
+                print(f"SNL READY token={token.decode('ascii')}", flush=True)
+        return
+    if cmd == 0x21:
+        drive, mode, length = read_exact(port, 3)
+        name = read_exact(port, length)
+        try:
+            if mode == 255:
+                pool.delete(drive, name)
+                reply = status(0)
+                pool.event("DELETE", drive=drive, file=name.decode("ascii"))
+            else:
+                handle, size = pool.open(drive, mode, name)
+                reply = status(0) + struct.pack(">II", handle, size)
+        except (OSError, ValueError, UnicodeError, KeyError, QDOSError) as exc:
+            code = error_code(exc)
+            pool.rejected += 1
+            pool.event("OPEN REJECTED" if mode != 255 else "DELETE REJECTED",
+                       drive=drive, mode=mode, file=name, status=code)
+            reply = status(code)
+    elif cmd == 0x22:
+        handle = int.from_bytes(read_exact(port, 4), "big")
+        inner = read_exact(port, 1)[0]
+        request = collect_request(port, inner)
+        session = pool.sessions.get(handle)
+        if trace:
+            print(f"RX handle={handle} command=${inner:02X}", flush=True)
+        try:
+            if session is None:
+                raise QDOSError(-6)
+            if inner == 0x04:
+                pool.close_handle(handle)
+                reply = status(0)
+            else:
+                if inner == 0x20:
+                    pool.check_directory_conversion(session)
+                packet = PacketPort(request)
+                serve_one(packet, session, trace=trace)
+                reply = bytes(packet.output)
+        except (OSError, ValueError, QDOSError) as exc:
+            reply = status(error_code(exc))
+            if inner in (0x12, 0x13):
+                reply += bytes(2)
+    else:
+        # V2.31 and earlier clients retain their original single-session wire
+        # operations. They cannot mix channels with a V2.32 client.
+        packet = PrefixPort(bytes((cmd,)), port)
+        serve_one(packet, pool.legacy, trace, reply_delay, byte_delay)
+        return
+    write_reply(port, reply, reply_delay, byte_delay)
+
+
+class PrefixPort:
+    def __init__(self, prefix, port):
+        self.prefix = bytearray(prefix)
+        self.port = port
+
+    def read(self, count):
+        if self.prefix:
+            out = bytes(self.prefix[:count])
+            del self.prefix[:count]
+            return out
+        return self.port.read(count)
+
+    def write(self, data):
+        return self.port.write(data)
+
+
 def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
     """Consume one complete request; errors retain each command's reply shape."""
+    if isinstance(session, SessionPool):
+        return serve_pool(port, session, trace, reply_delay, byte_delay)
     cmd = read_exact(port, 1)[0]
     if cmd == ord("~"):
         token = read_ready_probe(port)
@@ -808,7 +1009,7 @@ def main():
     import serial
     config = load_config()
     port, baud = config.get("serial_port", "/dev/ttyUSB0"), config.get("baud_rate", 9600)
-    session = Session(config.get("drives", {}))
+    session = SessionPool(config.get("drives", {}), config.get("channel_stats", True))
     settings = serial_settings(config)
     reply_delay = float(config.get("reply_delay_ms", 0)) / 1000
     byte_delay = float(config.get("inter_byte_delay_ms", 0)) / 1000
@@ -836,7 +1037,7 @@ def main():
     except (OSError, EOFError, serial.SerialException) as exc:
         print(f"Serial error: {exc}", file=sys.stderr)
     finally:
-        session.close()
+        session.close_all()
 
 
 if __name__ == "__main__":

@@ -24,6 +24,13 @@ LOADER_FIXTURE = ROOT / "tests" / "fixtures" / "loader_bas"
 class CacheCPU:
     def __init__(self, session):
         self.session = session
+        self.pool = snl.SessionPool(session.drives, statistics=False) if hasattr(session, "drives") else None
+        if self.pool is not None and session.file is not None:
+            self.pool.sessions[1] = session
+        self.alloc_next = 0x12000
+        self.allocated = set()
+        self.freed = []
+        self.alloc_error = 0
         self.reg = {f"{prefix}{i}": 0 for prefix in "da" for i in range(8)}
         self.mem = bytearray(0x40000)
         self.symbols = {}
@@ -38,7 +45,9 @@ class CacheCPU:
         source = (ROOT / "SNLdriver_asm").read_bytes().decode("latin1")
         source = (source[source.index("op_main "):source.index("; I/O: preserve")]
                   + source[source.index("io_info "):source.index("io_ok    ")]
-                  + source[source.index("snl_xfer "):source.index("; CLOSE closes")])
+                  + source[source.index("snl_xfer "):source.index("; CLOSE closes")]
+                  + source[source.index("snl_allc "):source.index("; Diagnostic output")]
+                  + source[source.index("cl_main "):source.index("; Restore the caller stack")])
         self.code, self.labels = [], {}
         for line in source.splitlines():
             line = line.split(";", 1)[0].rstrip()
@@ -51,8 +60,11 @@ class CacheCPU:
             op = fields[0].split(".")
             self.code.append((op[0], op[1] if len(op) > 1 else "w", fields[1].split(",") if len(fields) > 1 else []))
         self.reg.update(a5=0x2000, a1=0x4000, a7=0x3F000)
+        self.mem[0xD4:0xD6] = (0x1400).to_bytes(2, "big")
+        self.mem[0xC2:0xC4] = (0x1200).to_bytes(2, "big")
         self.mem[0x2004:0x2008] = (0xA018).to_bytes(4, "big")
         self.field("snl_buf", 0xC000)
+        self.field("snl_hand", 1)
         self.field("snl_serp", 0x800)
         self.mem[0x804:0x808] = (0x900).to_bytes(4, "big")
         self.mem[0x904:0x908] = (0xA00).to_bytes(4, "big")
@@ -62,6 +74,7 @@ class CacheCPU:
         self.wire = bytearray()
         self.reply = bytearray()
         self.requests = []
+        self.wire_requests = []
         self.read_lengths = []
         self.truncate_reply = None
         self.reply_override = None
@@ -105,6 +118,8 @@ class CacheCPU:
     def address(self, operand, width, update=True):
         m = re.fullmatch(r"(-)?([\w.$+-]*)\((a[0-7])\)(\+)?", operand)
         if not m:
+            if re.fullmatch(r"\$[0-9a-f]+|[0-9]+", operand):
+                return self.number(operand)
             raise AssertionError(f"Unsupported addressing: {operand}")
         pre, offset, reg, post = m.groups()
         if pre and offset:
@@ -167,33 +182,47 @@ class CacheCPU:
 
     def transmit(self, data):
         self.wire.extend(data)
-        cmd = self.wire[0]
-        assert cmd in (0x11, 0x12, 0x13, 0x15, 0x18, 0x19, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, ord("~")), self.wire.hex()
+        outer = self.wire[0]
+        start = 0
+        if outer == 0x22:
+            if len(self.wire) < 6:
+                return
+            start = 5
+        cmd = self.wire[start]
+        assert cmd in (0x11, 0x21, 0x12, 0x13, 0x04, 0x15, 0x16, 0x17,
+                       0x18, 0x19, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, ord("~")), self.wire.hex()
+        available = self.wire[start:]
         if cmd == ord("~"):
             count, length = 0, 22
-        elif cmd == 0x1E:
-            if len(self.wire) < 2:
-                return
-            count, length = 0, 2 + self.wire[1]
         elif cmd in (0x19, 0x1C, 0x1D, 0x1F, 0x20):
             count, length = 0, 6 if cmd == 0x19 else 5
-        elif cmd == 0x11:
-            if len(self.wire) < 4:
+        elif cmd == 0x1E:
+            if len(available) < 2:
                 return
-            count, length = 0, 4 + self.wire[3]
-        elif cmd in (0x15, 0x18):
+            count, length = 0, 2 + available[1]
+        elif cmd in (0x11, 0x21):
+            if len(available) < 4:
+                return
+            count, length = 0, 4 + available[3]
+        elif cmd in (0x04, 0x15, 0x17, 0x18):
             count, length = 0, 1
+        elif cmd == 0x16:
+            count, length = 0, 15
         else:
-            if len(self.wire) < 7:
+            if len(available) < 7:
                 return
-            count = int.from_bytes(self.wire[5:7], "big")
+            count = int.from_bytes(available[5:7], "big")
             length = 7 + (count if cmd == 0x13 else 0)
-        if len(self.wire) < length:
+        if len(available) < length:
             return
-        assert len(self.wire) == length
+        assert len(available) == length
         assert cmd == ord("~") or not self.reply, "New request before previous reply drained"
         packet = bytes(self.wire)
-        self.requests.append(packet)
+        self.wire_requests.append(packet)
+        logical = bytes(available)
+        if cmd == 0x21:
+            logical = b"\x11" + logical[1:]
+        self.requests.append(logical)
         if cmd == 0x12:
             self.read_lengths.append(count)
         if not self.daemon_online:
@@ -201,7 +230,7 @@ class CacheCPU:
             self.wire.clear()
             return
         port = Port(packet)
-        snl.serve_one(port, self.session)
+        snl.serve_one(port, self.pool)
         response = port.output
         if cmd == ord("~"):
             if self.ready_wrong_token:
@@ -347,14 +376,40 @@ class CacheCPU:
                     self.helper(args[0])
             elif op == "jsr":
                 assert args == ["(a4)"]
-                self.rom_read()
+                if self.reg["a4"] == 0x1400:
+                    pass  # UT.UNLNK: list manager is outside this interpreter
+                elif self.reg["a4"] == 0x1200:
+                    self.freed.append(self.reg["a0"])
+                else:
+                    self.rom_read()
             elif op == "trap":
-                assert args == ["#1"] and self.reg["d0"] == 0x13
+                assert args == ["#1"]
+                call = self.reg["d0"]
+                if call == 0x13:
+                    self.reg["d1"] = int(self.clock)
+                    self.clock += self.clock_step
+                elif call == 0x18 and self.alloc_error:
+                    self.reg["d0"] = self.alloc_error & 0xFFFFFFFF
+                    self.flags(self.reg["d0"], 4)
+                    continue
+                elif call == 0x18:
+                    addr = self.alloc_next
+                    self.alloc_next += self.reg["d1"]
+                    self.allocated.add(addr)
+                    self.reg["a0"] = addr
+                elif call == 0x19:
+                    addr = self.reg["a0"]
+                    self.freed.append(addr)
+                    self.allocated.discard(addr)
+                else:
+                    raise AssertionError(call)
                 self.reg["d0"] = 0
-                self.reg["d1"] = int(self.clock)
-                self.clock += self.clock_step
             elif op == "lea":
                 self.reg[args[1]] = self.address(args[0], 4, update=False)
+            elif op == "tas":
+                value = self.get(args[0], 1)
+                self.flags(value, 1)
+                self.put(args[0], value | 128, 1)
             elif op == "st":
                 self.put(args[0], 255, 1)
             elif op == "btst":
@@ -448,15 +503,20 @@ class BufferTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.session = snl.Session({"1": self.root})
+        self.pools = []
 
     def tearDown(self):
+        for pool in self.pools:
+            pool.close_all()
         self.session.close()
         self.tmp.cleanup()
 
     def cpu(self, payload):
         (self.root / "test_bas").write_bytes(payload)
         self.session.open(1, 0, b"test_bas")
-        return CacheCPU(self.session)
+        cpu = CacheCPU(self.session)
+        self.pools.append(cpu.pool)
+        return cpu
 
     def test_metadata_handlers_wire_and_pointer_preservation(self):
         for entry, value, selector, cmd in (("io_vers", 42, 0, 0x1C),
@@ -689,14 +749,14 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.transfer(1), (-11, b""))
         self.assertEqual(cpu.read_lengths, [512])
 
-    def test_read_request_is_exact_seven_byte_bulk_packet(self):
+    def test_read_request_has_handle_prefix_and_batched_offset_count(self):
         payload = bytes(range(256)) * 5
         cpu = self.cpu(payload)
         cpu.field("fs_nblok", 123)
         self.assertEqual(cpu.transfer(100, address=0x10001), (0, payload[123:223]))
         self.assertEqual(cpu.requests, [b"\x12\x00\x00\x00\x7b\x02\x00"])
-        self.assertEqual([size for _, size in cpu.tx_calls], [7])
-        self.assertEqual(cpu.tx_calls[0][0] % 2, 1)  # intentionally odd wire start
+        self.assertEqual([size for _, size in cpu.tx_calls], [6])
+        self.assertEqual(cpu.tx_calls[0][0] % 2, 0)  # aligned offset/count fields
         self.assertEqual(cpu.read_header_calls, [3])
         self.assertEqual(cpu.rom_calls, [512])
         self.assertEqual(cpu.field("snl_rx", width=2), 515)
@@ -714,9 +774,9 @@ class BufferTests(unittest.TestCase):
 
     def test_partial_bulk_read_request_is_not_replayed(self):
         cpu = self.cpu(b"abcdef")
-        cpu.tx_batches = [(2, -1), (0, -1), (5, 0)]
+        cpu.tx_batches = [(2, -1), (0, -1), (4, 0)]
         self.assertEqual(cpu.transfer(6), (0, b"abcdef"))
-        self.assertEqual([size for _, size in cpu.tx_calls], [7, 5, 5])
+        self.assertEqual([size for _, size in cpu.tx_calls], [6, 4, 4])
         self.assertEqual(cpu.requests, [b"\x12\x00\x00\x00\x00\x02\x00"])
         self.assertEqual(cpu.read_header_calls, [3])
 
@@ -730,7 +790,7 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.field("fs_nblok"), 0)
         self.assertEqual(cpu.reg["a1"], 0x10000)
         self.assertEqual(cpu.mem[0x10000:0x10006], b"Z" * 6)
-        self.assertEqual(bytes(cpu.wire), b"\x12\x00")
+        self.assertEqual(bytes(cpu.wire), b"\x22\x00\x00\x00\x01\x12\x00\x00")
         self.assertFalse(cpu.requests)
         self.assertFalse(cpu.read_header_calls)
 
@@ -929,7 +989,7 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.field("fs_eblok"), 0)
         self.assertEqual(cpu.field("snl_dead", width=1), 255)
         self.assertEqual(cpu.field("snl_last", width=2), 0xFFFA)
-        self.assertEqual(len(cpu.wire), 17)  # header plus ten queued payload bytes
+        self.assertEqual(len(cpu.wire), 22)  # handled header plus ten queued payload bytes
         self.assertFalse(cpu.requests)
         # An already poisoned transport must not replay this partial packet.
         before = bytes(cpu.wire)
@@ -1032,7 +1092,7 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.field("fs_nblok"), 512)
         self.assertEqual(cpu.field("fs_eblok"), 512)
         self.assertEqual(len(cpu.requests), 1)
-        self.assertEqual(len(cpu.wire), 11)
+        self.assertEqual(len(cpu.wire), 16)
 
     def test_bulk_write_waits_for_host_ack_before_reporting_success(self):
         cpu = self.cpu(b"")
@@ -1169,6 +1229,8 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.mem[0x10000:0x1000E], b"Z" * 14)
 
     def directory_request(self, cpu, mode, name=b"test_bas"):
+        cpu.pool.sessions = {h: session for h, session in cpu.pool.sessions.items()
+                             if session.file is not None}
         cpu.reg.update(a0=0x2000, a1=0x1000, a3=0xA000)
         cpu.field("fs_acces", mode, 1)
         cpu.field("fs_fname", len(name), 2)
@@ -1192,8 +1254,8 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.field("fs_acces", width=1), 255)
         self.assertFalse((self.root / "test_bas").exists())
         self.assertEqual(self.directory_request(cpu, 2), 0)
-        self.assertEqual(cpu.mem[0xA048], 255)  # subsequent real OPEN takes lock
-        self.assertEqual(cpu.field("snl_rx", width=2), 5)
+        self.assertEqual(int.from_bytes(cpu.mem[0xA048:0xA04A], "big"), 1)
+        self.assertEqual(cpu.field("snl_rx", width=2), 9)
 
     def test_driver_delete_not_found_preserves_status_and_file_count(self):
         cpu = self.cpu(b"keep")
@@ -1228,11 +1290,11 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(self.directory_request(cpu, 1), -13)
         self.assertEqual(cpu.diagnostics, ["dbg_rhi", "dbg_rx", "dbg_ser"])
 
-    def test_driver_delete_with_open_channel_sends_no_request(self):
+    def test_driver_delete_rejects_only_the_open_target(self):
         cpu = self.cpu(b"keep")
-        cpu.mem[0xA048] = 255
+        cpu.pool.epoch = b"AAAAAAAA"
         self.assertEqual(self.directory_request(cpu, 255), -9)
-        self.assertFalse(cpu.requests)
+        self.assertEqual(cpu.requests[-1][:3], b"\x11\x01\xff")
         self.assertEqual(cpu.mem[0x1022], 5)
         self.assertEqual((self.root / "test_bas").read_bytes(), b"keep")
 
@@ -1295,11 +1357,11 @@ class BufferTests(unittest.TestCase):
         self.assertIsNone(self.session.file)
         self.assertFalse((self.root / "test_bas").exists())
 
-    def test_ready_sends_nothing_when_an_snl_channel_is_active(self):
+    def test_second_open_preserves_active_session_and_checks_sharing(self):
         cpu = self.cpu(b"keep")
-        cpu.mem[0xA048] = 255
+        cpu.pool.epoch = b"AAAAAAAA"
         self.assertEqual(self.directory_request(cpu, 1), -9)
-        self.assertFalse(cpu.requests)
+        self.assertEqual(cpu.requests[-1][:3], b"\x11\x01\x01")
         self.assertIsNotNone(self.session.file)
 
     def test_ready_token_contains_installation_epoch_and_attempt_counter(self):

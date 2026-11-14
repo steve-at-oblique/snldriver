@@ -524,3 +524,11 @@ The source adds RENAME ($1E) and TRUNCATE ($1F). See the
 
 The source adds MAKE DIRECTORY ($20) and nested name resolution. See
 [Level-2 directory behavior and tests](LEVEL2_DIRECTORIES.md).
+
+## V2.32 multiple-channel candidate
+
+Handled OPEN ($21) and handled file requests ($22) support independent
+sessions. See [protocol, statistics and hardware tests](MULTIPLE_CHANNELS.md).
+
+V2.33 retains this protocol and gives directory-scan channels unique QDOS
+identities to prevent WCOPY destination-open conflicts. See the same test plan.
