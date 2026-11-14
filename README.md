@@ -1,9 +1,12 @@
 # SNL — serial filesystem for the Sinclair QL
 
-SNL is a Linux-backed file storage driver for the Sinclair QL. It lets your QL
-use a Linux computer as external file storage over a serial or USB serial
-connection. Load, save and run files directly from Linux directories using
-familiar QL commands. SNL uses SER2 on the QL and a Python daemon on Linux.
+SNL is a host-backed file storage driver for the Sinclair QL. It lets your QL
+use another computer as external file storage over a serial or USB serial
+connection. Possible hosts include Windows PCs, Linux PCs, and Raspberry Pi
+systems running Linux. Load, save and run files directly from host directories
+using familiar QL commands. SNL uses SER2 on the QL and a Python daemon on
+the host computer. Hardware testing so far has used a Linux host; Windows
+and Raspberry Pi host setups have not yet been validated for this release.
 
 **V2.31** adds Level-2 directories.
 See the [directory hardware test plan](docs/LEVEL2_DIRECTORIES.md).
@@ -35,9 +38,9 @@ workflows. The QL can assemble SNL itself and save its new binary through SNL.
 ```text
 bin/              Release binary (snldriver231_bin)
 SNLdriver_asm      Self-contained QL assembly source
-snl_serial         Linux serial filesystem daemon
+snl_serial         Python serial filesystem daemon
 snl_config.json    Shareable configuration with relative drive paths
-tools/             Linux transfer and verification utilities
+tools/             Host transfer and verification utilities
 tests/             Python regression tests
   ql/              BASIC programs for hardware tests
   fixtures/        Sample input used by regression tests
@@ -49,15 +52,22 @@ The assembly constants are already in `SNLdriver_asm`. No separate include
 file is needed, and SYM output is disabled so assembly can use one SNL file
 at a time. Retained reference sources are not build inputs.
 
-## Linux setup
+## Host setup
 
-Install Python 3 and pyserial. From the repository root, choose the included
-configuration for your interface and copy it over `snl_config.json`:
+Install Python 3 and pyserial on the host. Run the daemon from the repository
+root so it finds `snl_config.json`. Choose the included configuration for
+your interface, then edit its serial port and drive paths for your computer:
 
-| Connection | Linux device | Configuration | RTS/CTS |
-| --- | --- | --- | --- |
-| Stock QL SER2 through a USB-to-serial adapter | `/dev/ttyUSB0` | `snl_configUSB0.json` | Enabled |
-| QIMSI Gold USB serial (QL SER2 under SMSQ/E) | `/dev/ttyACM0` | `snl_configACM0.json` | Disabled |
+| Connection | Linux / Raspberry Pi OS example | Windows example | Configuration | RTS/CTS |
+| --- | --- | --- | --- | --- |
+| Stock QL SER2 through a USB-to-serial adapter | `/dev/ttyUSB0` | `COM3` | `snl_configUSB0.json` | Enabled |
+| QIMSI Gold USB serial (QL SER2 under SMSQ/E) | `/dev/ttyACM0` | `COM3` | `snl_configACM0.json` | Disabled |
+
+The port names are examples. On Windows, check Device Manager for the assigned
+COM port. On Linux, including Raspberry Pi OS, use the device assigned to
+your adapter. Windows may require an appropriate driver for the USB device.
+
+### Linux and Raspberry Pi OS
 
 For a stock QL with a USB-to-serial adapter:
 
@@ -71,25 +81,58 @@ For QIMSI Gold USB:
 cp snl_configACM0.json snl_config.json
 ```
 
-Both example configurations map `snl1_` through `snl6_` to `drive1` through
-`drive6`. Create those directories and start the daemon:
+Create the mapped directories and start the daemon:
 
 ```sh
 mkdir -p drive1 drive2 drive3 drive4 drive5 drive6
 python3 snl_serial
 ```
 
-Edit `snl_config.json` for your serial-device path and mapped directories.
+### Windows (PowerShell)
+
+Install pyserial using your Python installation, for example:
+
+```powershell
+py -m pip install pyserial
+```
+
+Copy the configuration for your interface, using one of:
+
+```powershell
+Copy-Item snl_configUSB0.json snl_config.json
+# Or, for QIMSI Gold USB:
+Copy-Item snl_configACM0.json snl_config.json
+```
+
+Edit `serial_port` in `snl_config.json` to the assigned port, such as `COM3`.
+Then create the mapped directories and start the daemon:
+
+```powershell
+New-Item -ItemType Directory -Force -Path drive1,drive2,drive3,drive4,drive5,drive6
+py snl_serial
+```
+
+If your Python installation uses `python` rather than `py`, substitute that
+command. Windows operation, including file operations on open channels such
+as RENAME, still requires platform testing.
+
+### Drive mappings
+
+Both example configurations map `snl1_` through `snl6_` to `drive1` through
+`drive6`. Add entries and create their directories before using additional
+drives such as `snl7_`.
+
 Relative drive paths are resolved from the directory where you start the
-daemon. The checked-in configuration contains relative paths and is intended
-to be shared. A leading `~` is not expanded automatically.
+daemon. A leading `~` is not expanded automatically. For absolute Windows
+paths in JSON, use forward slashes (`C:/QL/drive1`) or escape backslashes
+(`C:\\QL\\drive1`).
 
 For the stock QL's physical serial connection, use 9600 baud, eight data bits,
 no parity, two stop bits, and RTS/CTS hardware flow control. Match the tested
 QL cable wiring, including the handshake lines. QIMSI USB uses RTS/CTS off;
 the example retains the baud and stop-bit settings, but these do not set its
-USB transfer speed. Linux device numbers can vary, so adjust `serial_port`
-if your interface appears under a different name.
+USB transfer speed. Adjust `serial_port` whenever the host assigns a different
+port name.
 
 The daemon reserves its host serial device; stop it before switching
 configurations or using the same device for bootstrapping.
@@ -102,7 +145,8 @@ Use `bin/snldriver231_bin` (4,698 bytes) with the matching updated daemon.
 The self-contained source assembles with Talent/Quanta 2.02.
 Load it into reserved memory and install it with CALL, not EXEC. See the
 [binary serial bootstrap guide](docs/BINARY_BOOTSTRAP.md) for a direct LBYTES
-transfer using `python3 tools/qltransfer_bin your_binary` on Linux. Allocate
+transfer using `python3 tools/qltransfer_bin your_binary` on the host
+(use `py` in place of `python3` on Windows). Allocate
 enough memory for the actual binary, with at least 14 bytes for serial LBYTES.
 The SNL entry offset is zero for the raw binaries checked during development.
 
@@ -127,7 +171,7 @@ Use quoted filenames where needed by SuperBASIC syntax.
 ## Files and backups
 
 New SNL files contain payload bytes; their QDOS metadata is stored in a hidden
-`.snl_headers` directory. Preserve that directory with Linux-side backups and
+`.snl_headers` directory. Preserve that directory with host-side backups and
 move/rename the corresponding metadata when moving/renaming files manually.
 The daemon also understands 30- and 44-byte emulator wrappers, allowing files
 extracted by QL Unzip in sQLux to be used by the physical QL.
@@ -159,8 +203,11 @@ been used on hardware; WCOPY failed during testing and remains unverified.
 From the repository root:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -q
+python3 -B -m unittest discover -s tests -t . -q
 ```
+
+On Windows, substitute `py` for `python3`. Some tests exercise filesystem
+behaviors such as symlinks and may need platform-specific permissions.
 
 The automated tests cover the daemon and an interpreter of the actual assembly source,
 including transport errors, register/stack handling and alignment. The five
