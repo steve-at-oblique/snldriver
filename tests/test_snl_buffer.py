@@ -47,7 +47,8 @@ class CacheCPU:
                   + source[source.index("io_info "):source.index("io_ok    ")]
                   + source[source.index("snl_xfer "):source.index("; CLOSE closes")]
                   + source[source.index("snl_allc "):source.index("; Diagnostic output")]
-                  + source[source.index("cl_main "):source.index("; Restore the caller stack")])
+                  + source[source.index("cl_main "):source.index("; Restore the caller stack")]
+                  + source[source.index("\nsnl_kick ")+1:source.index("; Protocol status")])
         self.code, self.labels = [], {}
         for line in source.splitlines():
             line = line.split(";", 1)[0].rstrip()
@@ -96,6 +97,7 @@ class CacheCPU:
         self.ready_noise = b""
         self.ready_wrong_token = False
         self.kicks = 0
+        self.tx_frame_deltas = []
         self.steps = 0
         self.z = self.n = self.c = self.v = False
 
@@ -369,12 +371,22 @@ class CacheCPU:
                     for reg in self.register_list(args[1]):
                         self.reg[reg] = self.get("(a7)+", 4)
             elif op == "bsr":
+                if args[0] == "snl_kick":
+                    self.kicks += 1
                 if args[0] in self.labels:
                     self.put("-(a7)", pc, 4)
                     pc = self.labels[args[0]]
                 else:
                     self.helper(args[0])
             elif op == "jsr":
+                if args == ["(a0)"]:
+                    self.tx_frame_deltas.append(self.reg["d3"] & 0xFFFF)
+                    if self.queued_tx:
+                        self.transmit(self.queued_tx[:1])
+                        del self.queued_tx[:1]
+                    for reg in self.register_list("d0-d7/a0-a6"):
+                        self.reg[reg] = 0xDEADBEEF
+                    continue
                 assert args == ["(a4)"]
                 if self.reg["a4"] == 0x1400:
                     pass  # UT.UNLNK: list manager is outside this interpreter
@@ -749,13 +761,84 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.transfer(1), (-11, b""))
         self.assertEqual(cpu.read_lengths, [512])
 
-    def test_read_request_has_handle_prefix_and_batched_offset_count(self):
+    def test_batched_header_preserves_registers_and_encodes_all_handle_bytes(self):
+        cpu = self.cpu(bytes(range(256)) * 4)
+        session = cpu.pool.sessions.pop(1)
+        cpu.pool.sessions[0x12345678] = session
+        cpu.field("snl_hand", 0x12345678)
+        cpu.reg.update(d1=0x12, d2=123, d3=17, a1=0x10001)
+        saved = {r: cpu.reg[r] for r in cpu.register_list("d2-d7/a0-a6")}
+        self.assertEqual(cpu.run("snl_req")[0], 0)
+        self.assertEqual({r: cpu.reg[r] for r in saved}, saved)
+        self.assertEqual(cpu.wire_requests, [b"\x22\x12\x34\x56\x78\x12\x00\x00\x00\x7b\x00\x11"])
+        self.assertEqual([size for _, size in cpu.tx_calls], [12])
+        self.assertEqual(cpu.reg["a7"], 0x3F000)
+
+    def test_stock_write_uses_batched_header_and_bulk_payload(self):
+        cpu = self.cpu(b"")
+        cpu.field("snl_txp", 0x1234)
+        payload = bytes(range(256)) * 2 + b"end"
+        self.assertEqual(cpu.transfer(len(payload), action=1, data=payload)[0], 0)
+        self.assertEqual([size for _, size in cpu.tx_calls], [12, 512, 12, 3])
+        self.session.file.seek(0)
+        self.assertEqual(self.session.file.read(), payload)
+
+    def test_stock_read_uses_complete_header_batch(self):
+        payload = bytes(range(256)) * 3
+        cpu = self.cpu(payload)
+        cpu.field("snl_txp", 0x1234)
+        cpu.field("fs_nblok", 123)
+        self.assertEqual(cpu.transfer(600), (0, payload[123:723]))
+        self.assertEqual([size for _, size in cpu.tx_calls], [12, 12])
+        self.assertEqual(cpu.field("snl_dead", width=1), 0)
+
+    def test_rom_service_counts_frames_not_poll_calls(self):
+        cpu = self.cpu(b"")
+        cpu.field("snl_txp", 0x1234)
+        cpu.field("snl_tick", 100, 2)
+        cpu.put("$30(a6)", 100, 2)
+        saved = dict(cpu.reg)
+        for _ in range(100):
+            cpu.run("snl_kick")
+        self.assertEqual(cpu.tx_frame_deltas, [0] * 100)
+        cpu.put("$30(a6)", 102, 2)
+        cpu.run("snl_kick")
+        cpu.run("snl_kick")
+        self.assertEqual(cpu.tx_frame_deltas[-2:], [2, 0])
+        self.assertEqual(cpu.field("snl_tick", width=2), 102)
+        self.assertEqual({r: cpu.reg[r] for r in saved if r != "a7"},
+                         {r: saved[r] for r in saved if r != "a7"})
+
+    def test_rom_service_frame_counter_wrap(self):
+        cpu = self.cpu(b"")
+        cpu.field("snl_txp", 0x1234)
+        cpu.field("snl_tick", 65535, 2)
+        cpu.put("$30(a6)", 1, 2)
+        cpu.run("snl_kick")
+        self.assertEqual(cpu.tx_frame_deltas, [2])
+
+    def test_partial_batched_write_header_does_not_send_payload_or_replay(self):
+        cpu = self.cpu(b"")
+        cpu.tx_batches = [(5, -6)]
+        self.assertEqual(cpu.transfer(10, action=1, data=b"0123456789")[0], -6)
+        self.assertEqual(bytes(cpu.wire), b"\x22\x00\x00\x00\x01")
+        self.assertEqual(cpu.reg["a1"], 0x10000)
+        self.assertEqual(cpu.field("fs_nblok"), 0)
+        self.assertEqual(cpu.field("fs_eblok"), 0)
+        self.assertEqual(self.session.file_size(), 0)
+        self.assertEqual(cpu.field("snl_dead", width=1), 255)
+        self.assertFalse(cpu.requests)
+        before = bytes(cpu.wire)
+        self.assertEqual(cpu.transfer(10, action=1, data=b"0123456789")[0], -13)
+        self.assertEqual(bytes(cpu.wire), before)
+
+    def test_read_request_sends_complete_handled_header_in_one_batch(self):
         payload = bytes(range(256)) * 5
         cpu = self.cpu(payload)
         cpu.field("fs_nblok", 123)
         self.assertEqual(cpu.transfer(100, address=0x10001), (0, payload[123:223]))
         self.assertEqual(cpu.requests, [b"\x12\x00\x00\x00\x7b\x02\x00"])
-        self.assertEqual([size for _, size in cpu.tx_calls], [6])
+        self.assertEqual([size for _, size in cpu.tx_calls], [12])
         self.assertEqual(cpu.tx_calls[0][0] % 2, 0)  # aligned offset/count fields
         self.assertEqual(cpu.read_header_calls, [3])
         self.assertEqual(cpu.rom_calls, [512])
@@ -774,9 +857,9 @@ class BufferTests(unittest.TestCase):
 
     def test_partial_bulk_read_request_is_not_replayed(self):
         cpu = self.cpu(b"abcdef")
-        cpu.tx_batches = [(2, -1), (0, -1), (4, 0)]
+        cpu.tx_batches = [(2, -1), (0, -1), (10, 0)]
         self.assertEqual(cpu.transfer(6), (0, b"abcdef"))
-        self.assertEqual([size for _, size in cpu.tx_calls], [6, 4, 4])
+        self.assertEqual([size for _, size in cpu.tx_calls], [12, 10, 10])
         self.assertEqual(cpu.requests, [b"\x12\x00\x00\x00\x00\x02\x00"])
         self.assertEqual(cpu.read_header_calls, [3])
 
@@ -790,7 +873,7 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(cpu.field("fs_nblok"), 0)
         self.assertEqual(cpu.reg["a1"], 0x10000)
         self.assertEqual(cpu.mem[0x10000:0x10006], b"Z" * 6)
-        self.assertEqual(bytes(cpu.wire), b"\x22\x00\x00\x00\x01\x12\x00\x00")
+        self.assertEqual(bytes(cpu.wire), b"\x22\x00")
         self.assertFalse(cpu.requests)
         self.assertFalse(cpu.read_header_calls)
 
@@ -957,7 +1040,7 @@ class BufferTests(unittest.TestCase):
                 self.assertEqual(cpu.field("fs_nblok"), count)
                 self.assertEqual(cpu.field("fs_eblok"), count)
                 sizes = [min(512, count - offset) for offset in range(0, count, 512)]
-                self.assertEqual([size for _, size in cpu.tx_calls], sizes)
+                self.assertEqual([size for _, size in cpu.tx_calls], [n for size in sizes for n in (12, size)])
                 self.assertEqual([int.from_bytes(p[5:7], "big") for p in cpu.requests], sizes)
                 self.session.flush()
                 self.assertEqual((self.root / "test_bas").read_bytes(), payload)
@@ -968,20 +1051,20 @@ class BufferTests(unittest.TestCase):
         payload = bytes(range(100))
         cpu = self.cpu(b"")
         # Includes ERR.NC with no progress, short success, and a complete NC.
-        cpu.tx_batches = [(0, -1), (10, -1), (20, 0), (0, -1), (70, -1)]
+        cpu.tx_batches = [(12, 0)] + [(0, -1), (10, -1), (20, 0), (0, -1), (70, -1)]
         self.assertEqual(cpu.transfer(100, action=1, data=payload)[0], 0)
-        self.assertEqual(cpu.tx_calls, [(0x10000, 100), (0x10000, 100),
+        self.assertEqual(cpu.tx_calls[1:], [(0x10000, 100), (0x10000, 100),
                                         (0x1000A, 90), (0x1001E, 70),
                                         (0x1001E, 70)])
         self.assertEqual(cpu.requests, [b"\x13\x00\x00\x00\x00\x00\x64" + payload])
         self.assertEqual(cpu.reg["d1"], 100)
         self.assertEqual(cpu.reg["a1"], 0x10064)
         self.assertEqual(cpu.field("snl_dead", width=1), 0)
-        self.assertEqual(cpu.kicks, 10)  # legacy service before and after every batch
+        self.assertEqual(cpu.kicks, 12)  # header plus five payload batches
 
     def test_bulk_write_partial_error_does_not_advance_unacknowledged_position(self):
         cpu = self.cpu(b"")
-        cpu.tx_batches = [(10, -6)]
+        cpu.tx_batches = [(12, 0)] + [(10, -6)]
         self.assertEqual(cpu.transfer(100, action=1, data=b"X" * 100)[0], -6)
         self.assertEqual(cpu.reg["d1"], 0)
         self.assertEqual(cpu.reg["a1"], 0x10000)
@@ -996,12 +1079,12 @@ class BufferTests(unittest.TestCase):
         cpu.reg["d2"] = 100
         self.assertEqual(cpu.run("snl_bput")[0], -13)
         self.assertEqual(bytes(cpu.wire), before)
-        self.assertEqual(len(cpu.tx_calls), 1)
+        self.assertEqual(len(cpu.tx_calls), 2)
 
     def test_bulk_write_idle_timeout_after_progress(self):
         cpu = self.cpu(b"")
         cpu.clock_step = 1
-        cpu.tx_batches = [(10, -1)] + [(0, -1)] * 10
+        cpu.tx_batches = [(12, 0)] + [(10, -1)] + [(0, -1)] * 10
         self.assertEqual(cpu.transfer(100, action=1, data=b"X" * 100)[0], -13)
         self.assertEqual(cpu.reg["d1"], 0)
         self.assertEqual(cpu.reg["a1"], 0x10000)
@@ -1012,7 +1095,7 @@ class BufferTests(unittest.TestCase):
     def test_bulk_write_progress_resets_idle_deadline(self):
         cpu = self.cpu(b"")
         cpu.clock_step = 1
-        cpu.tx_batches = [(1, -1)] * 20
+        cpu.tx_batches = [(12, 0)] + [(1, -1)] * 20
         payload = bytes(range(20))
         self.assertEqual(cpu.transfer(20, action=1, data=payload)[0], 0)
         self.assertEqual(cpu.reg["d1"], 20)
@@ -1043,7 +1126,7 @@ class BufferTests(unittest.TestCase):
         for count in (101, -1):
             with self.subTest(count=count):
                 cpu = self.cpu(b"")
-                cpu.tx_batches = [(count, 0)]
+                cpu.tx_batches = [(12, 0)] + [(count, 0)]
                 self.assertEqual(cpu.transfer(100, action=1, data=b"X" * 100)[0], -13)
                 self.assertEqual(cpu.reg["d1"], 0)
                 self.assertEqual(cpu.reg["a1"], 0x10000)
@@ -1084,7 +1167,7 @@ class BufferTests(unittest.TestCase):
 
     def test_bulk_write_counts_only_acknowledged_previous_blocks(self):
         cpu = self.cpu(b"")
-        cpu.tx_batches = [(512, 0), (4, -6)]
+        cpu.tx_batches = [(12, 0), (512, 0), (12, 0), (4, -6)]
         payload = bytes(range(256)) * 4
         self.assertEqual(cpu.transfer(1024, action=1, data=payload)[0], -6)
         self.assertEqual(cpu.reg["d1"], 512)

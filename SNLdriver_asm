@@ -31,7 +31,7 @@
 ; Applies to Steve Jennen's original contributions. Existing third-party
 ; copyright and redistribution notices are retained at the end of this file.
 ;
-; Version       : 2.33 (multiple channels and daemon statistics)
+; Version       : 2.36 (batched headers and frame-timed ROM service)
 ; Wire protocol : SNL v2, with readiness handshake and directory support
 ; Target        : Sinclair QL / Motorola 68000 instruction set
 ; Assembler     : Talent/Quanta Assembler 2.02
@@ -163,7 +163,7 @@ boot_err bsr      dbg_boot
          rts
 
 banner   dc.w     67                        ; text bytes only; exclude Talent alignment padding
-         dc.b     'SNL Device driver V2.33 - BSD-2-Clause',10
+         dc.b     'SNL Device driver V2.36 - BSD-2-Clause',10
          dc.b     'Copyright 2026 Steve Jennen',10
 ban_end  equ      *
          dc.b     0                         ; word alignment
@@ -191,6 +191,7 @@ snl_base equ      fs_spare+32               ; long: payload offset of cached fir
 snl_len  equ      fs_spare+36               ; word: valid cached bytes, 0..512
 snl_err  equ      fs_spare+38               ; word: deferred result at end of cache
 snl_hand equ      fs_spare+40               ; long: daemon session handle
+snl_tick equ      fs_spare+44               ; word: last ROM-service frame counter
 snl_time equ      3                         ; per-byte RTC deadline in seconds
 
 ; fs_nblok and fs_eblok are FLAT payload position/length, no header offset.
@@ -408,6 +409,7 @@ op_sys   move.l   a7,a2                     ; same restore frame, no stack switc
          bra      op_main
 op_main  movem.l  d4-d7/a0-a1/a3-a6,-(a7)
          move.l   a0,a5
+         move.w   $30(a6),snl_tick(a5)       ; SV.POLLM: actual elapsed frames
          move.l   a1,snl_pdb(a5)
          move.b   fs_acces(a5),snl_mode(a5)
          move.l   #-1,snl_chid(a5)
@@ -547,6 +549,7 @@ io_sys   move.l   a7,a2
          bra      io_main
 io_main  movem.l  d2-d7/a0/a2-a6,-(a7)
          move.l   a0,a5
+         move.w   $30(a6),snl_tick(a5)       ; SV.POLLM: actual elapsed frames
          move.b   d0,snl_call(a5)
          clr.b    snl_phas(a5)
          clr.w    snl_cnt(a5)
@@ -922,13 +925,9 @@ x_next   tst.l    d5
 x_count  moveq    #$13,d1                   ; WRITE command
 x_req    move.b   #1,snl_phas(a5)
          clr.w    snl_rx(a5)
-         bsr      snl_cmd
-         bne      x_ret
-         move.l   fs_nblok(a5),d1
-         bsr      snl_putl
-         bne      x_ret
-         move.l   d6,d1
-         bsr      snl_putw
+         move.l   fs_nblok(a5),d2
+         move.l   d6,d3
+         bsr      snl_req
          bne      x_ret
 x_write  move.b   #4,snl_phas(a5)           ; payload transmission
          move.l   d6,d2
@@ -1086,17 +1085,10 @@ snl_fill movem.l  d2-d7/a1-a4,-(a7)
          move.l   d1,snl_base(a5)
          move.b   #1,snl_phas(a5)
          clr.w    snl_rx(a5)
-; Emit handled READ prefix, then six aligned offset/count bytes in a batch.
-
-         move.b   #$12,1(a7)
-         move.l   snl_base(a5),2(a7)
-         move.w   #512,6(a7)
          moveq    #$12,d1
-         bsr      snl_cmd
-         bne      cf_ret
-         lea      2(a7),a1
-         moveq    #6,d2
-         bsr      snl_bput
+         move.l   snl_base(a5),d2
+         move.l   #512,d3
+         bsr      snl_req
          bne      cf_ret
          move.b   #2,snl_phas(a5)
          move.l   a7,a1
@@ -1428,6 +1420,7 @@ cl_sys   move.l   a7,a2
          bra      cl_main
 cl_main  movem.l  d4-d7/a3-a6,-(a7)
          move.l   a0,a5
+         move.w   $30(a6),snl_tick(a5)       ; SV.POLLM: actual elapsed frames
          move.l   ch_drivr(a5),a2
          move.l   a2,-(a7)                 ; retain linkage through CDB release
          moveq    #err.te,d0
@@ -1494,6 +1487,27 @@ snl_free movem.l  d0-d3/a0-a3,-(a7)
          moveq    #$19,d0
          trap     #1
 sf_ret   movem.l  (a7)+,d0-d3/a0-a3
+         tst.l    d0
+         rts
+
+; Send complete READ/WRITE header in one string call. D1=command,
+; D2=offset, D3.W=count. Preserve caller A1 and all except D0/D1.
+; Handle is odd on the wire: copy as bytes, never an unaligned longword.
+snl_req  movem.l  d2-d3/a1,-(a7)
+         suba.w   #12,a7
+         move.b   #$22,(a7)
+         move.b   snl_hand(a5),1(a7)
+         move.b   snl_hand+1(a5),2(a7)
+         move.b   snl_hand+2(a5),3(a7)
+         move.b   snl_hand+3(a5),4(a7)
+         move.b   d1,5(a7)
+         move.l   d2,6(a7)
+         move.w   d3,10(a7)
+         move.l   a7,a1
+         moveq    #12,d2
+         bsr      snl_bput
+         adda.w   #12,a7
+         movem.l  (a7)+,d2-d3/a1
          tst.l    d0
          rts
 
@@ -1725,15 +1739,20 @@ st_ret   movem.l  (a7)+,d2-d7/a0-a3
 ; Call the validated ROM serial task; no-op for sQLux or SMSQ/E USB I/O.
 ; QDOS restores SR with RTE; Minerva uses MOVE/RTS. Both accept JSR.
 ; This calls the serial task directly, not the general scheduler.
-; D3=1 advances the ROM's port-switch countdown when the selected port is
-; idle. It checks UART busy and CTS before sending, preserving hardware
-; arbitration. All registers used by the file/byte routines are protected.
+; D3 is elapsed 50 Hz frames, NOT the number of polling calls. Decrementing
+; the ROM port-switch wait on every poll can switch away before a character
+; finishes. SV.POLLM advances in frame IRQs even while scheduling is blocked.
+; Entry establishes a fresh baseline; all registers are protected.
 
 snl_kick movem.l  d0-d7/a0-a6,-(a7)
          move.l   snl_txp(a5),a0
          move.l   a0,d0
          beq      sk_done
-         moveq    #1,d3
+         moveq    #0,d3
+         move.w   $30(a6),d3
+         move.w   d3,d0
+         sub.w    snl_tick(a5),d3
+         move.w   d0,snl_tick(a5)
          jsr      (a0)
 sk_done  movem.l  (a7)+,d0-d7/a0-a6
          rts

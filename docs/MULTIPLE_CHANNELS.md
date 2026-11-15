@@ -1,7 +1,9 @@
 # V2.33: multiple channels and daemon statistics
 
-The distributed release is `bin/snldriver233_bin` (4,950 bytes), with the
-matching updated daemon. Hardware results are recorded below. V2.32 was the
+The current distributed release is `bin/snldriver236_bin` (5,012 bytes), with
+the matching updated daemon. The original V2.33 hardware results and test
+plan are recorded below; see [V2.36 validation](BATCHED_CHANNEL_HEADERS.md)
+for header batching, stock ROM timing, and current performance results. V2.32 was the
 initial multi-channel candidate; V2.33 corrects directory-scan identities for
 SNL-to-SNL WCOPY.
 
@@ -65,12 +67,16 @@ channel consumes its normal QDOS CDB plus a separate 512-byte read buffer.
 With `channel_stats: true` in `snl_config.json`, events look like:
 
 ```text
-SNL OPEN handle=100 drive=1 mode=1 file='source_zip' active=1 peak=1
-SNL OPEN handle=101 drive=1 mode=2 file='output_bas' active=2 peak=2
-SNL CLOSE handle=101 file='output_bas' active=1 peak=2
-SNL CLOSE handle=100 file='source_zip' active=0 peak=2
-SNL SUMMARY reason='shutdown' opens=2 closes=2 rejected=0 active=0 peak=2
+11/14/2026 09:08:07 SNL OPEN handle=100 drive=1 mode=1 file='source_zip' active=1 peak=1
+11/14/2026 09:08:07 SNL OPEN handle=101 drive=1 mode=2 file='output_bas' active=2 peak=2
+11/14/2026 09:08:07 SNL CLOSE handle=101 file='output_bas' active=1 peak=2
+11/14/2026 09:08:07 SNL CLOSE handle=100 file='source_zip' active=0 peak=2
+11/14/2026 09:08:07 SNL SUMMARY reason='shutdown' opens=2 closes=2 rejected=0 active=0 peak=2
 ```
+
+Every daemon console line is prefixed with host-local `MM/DD/YYYY HH:MM:SS`,
+including startup, statistics, trace output, and reported serial errors.
+Timestamps have one-second precision.
 
 - `active`: currently open handled sessions, including directory snapshots.
 - `peak`: highest active count since daemon startup.

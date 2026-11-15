@@ -149,3 +149,27 @@ Mode 4: write 116.3636 KiB/s, read 85.33 KiB/s. Performance matches the
 V2.25 uninstrumented baseline after restoring legacy serial servicing for
 stock QDOS. Functional regression tests also passed on the stock 128K QL;
 no stock QL throughput figure was reported for this release.
+
+## V2.33 multi-channel timing and V2.34 candidate
+
+With tracing disabled, the user reported 20 x 256 KiB writes in 49 seconds
+(104.4898 KiB/s) and reads in 65 seconds (78.76923 KiB/s) on QIMSI/SMSQ/E.
+V2.34 source batches complete handled READ/WRITE headers to reduce serial
+driver call overhead without changing wire bytes. See the
+[comparison plan](BATCHED_CHANNEL_HEADERS.md) for hardware results.
+
+V2.34 QIMSI/SMSQ/E result, 20 x 256 KiB: writes **39 seconds /
+131.2821 KiB/s**, reads **60 seconds / 85.3333 KiB/s**. Compared with
+V2.33, throughput improved 25.6% writing and 8.3% reading. See the comparison
+plan for the subsequent stock correction and V2.36 validation.
+
+
+## V2.36 hardware validation
+
+QIMSI/SMSQ/E, 20 x 256 KiB: writes **40 seconds / 128 KiB/s**, reads
+**60 seconds / 85.3333 KiB/s**. Throughput is 22.5% higher writing and 8.3%
+higher reading than V2.33. The one-second write difference from V2.34 is
+consistent with run-to-run variation at whole-second timing resolution.
+Six channel-diagnostic runs passed on QIMSI and six on stock QL/TK2. V2.36
+retains header batching on both transports and supplies actual elapsed frame
+counts to the stock ROM transmit service.

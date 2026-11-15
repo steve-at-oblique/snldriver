@@ -1,12 +1,14 @@
 # Documentation
 
-Start with the [project README](../README.md) for the V2.33 release binary
+Start with the [project README](../README.md) for the V2.36 release binary
 and tested operations. Run commands from the repo root unless a guide
 explicitly says otherwise.
 
-Current source and release binary are V2.33.
+Current source and release binary are V2.36, validated on stock QL/TK2 and QIMSI.
 
 ## Practical guides
+
+- [V2.36 batched channel headers](BATCHED_CHANNEL_HEADERS.md): header batching and frame-timed stock ROM service, integrity checks and 20-repetition timing.
 
 - [V2.33 multiple channels and statistics](MULTIPLE_CHANNELS.md): independent
   channels, SNL-to-SNL copying, daemon counts and workload measurements.

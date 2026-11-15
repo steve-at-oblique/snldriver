@@ -1,5 +1,6 @@
-10 REMark SNL V2.33 + Toolkit II or SMSQ/E; two disposable fresh names
-20 testsrc$="snl1_mc233_src": testdst$="snl1_mc233_dst"
+10 REMark SNL V2.36 + Toolkit II or SMSQ/E; two disposable fresh names
+15 PRINT "SNL channel diagnostics revision 4"
+20 testsrc$="snl1_mc236_src": testdst$="snl1_mc236_dst"
 30 count=1537: bad=0
 40 OPEN_NEW #3,testsrc$
 50 FOR i=0 TO count-1
@@ -13,13 +14,25 @@
 130 REMark Three active channels: directory and two independent readers
 140 OPEN_IN #3,testsrc$
 150 OPEN_IN #4,testdst$
-160 IF FLEN(#3)<>count THEN bad=bad+1
-170 IF FLEN(#4)<>count THEN bad=bad+1
+160 IF FLEN(#3)<>count THEN
+162   bad=bad+1
+164   PRINT "Source length: ";FLEN(#3);" expected ";count
+166 END IF
+170 IF FLEN(#4)<>count THEN
+172   bad=bad+1
+174   PRINT "Copy length: ";FLEN(#4);" expected ";count
+176 END IF
 180 FOR i=0 TO count-1
 190   BGET #3,leftval
 200   BGET #4,rightval
 210   want=i-256*INT(i/256)
-220   IF leftval<>want OR rightval<>want THEN bad=bad+1
+220   IF leftval<>want OR rightval<>want THEN
+221     bad=bad+1
+222     IF bad<=5 THEN
+223       PRINT "Mismatch at offset ";i
+224       PRINT "Expected ";want;" source ";leftval;" copy ";rightval
+225     END IF
+226   END IF
 230 END FOR i
 240 CLOSE #3
 250 CLOSE #4

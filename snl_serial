@@ -21,6 +21,13 @@ READY_REPLY = b"~SNL!"
 READY_TOKEN_LENGTH = 16  # two 32-bit values encoded as ASCII A..P nibbles
 
 
+def log_message(message, *, file=None, flush=True):
+    """Prefix each console line with the host's local date/time to seconds."""
+    timestamp = datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")
+    for line in str(message).splitlines() or [""]:
+        print(f"{timestamp} {line}", file=file, flush=flush)
+
+
 def read_ready_probe(port):
     """Read after '~'; another '~' restarts an interrupted probe.
 
@@ -685,7 +692,7 @@ class SessionPool:
     def event(self, action, **fields):
         if self.statistics:
             detail = " ".join(f"{k}={v!r}" for k, v in fields.items())
-            print(f"SNL {action} {detail} active={len(self.sessions)} peak={self.peak}", flush=True)
+            log_message(f"SNL {action} {detail} active={len(self.sessions)} peak={self.peak}", flush=True)
 
     def open(self, drive, mode, name):
         session = Session(self.drives)
@@ -787,7 +794,7 @@ def serve_pool(port, pool, trace=False, reply_delay=0, byte_delay=0):
             pool.ready(token)
             write_reply(port, READY_REPLY + token + b"\n", reply_delay, byte_delay)
             if trace:
-                print(f"SNL READY token={token.decode('ascii')}", flush=True)
+                log_message(f"SNL READY token={token.decode('ascii')}", flush=True)
         return
     if cmd == 0x21:
         drive, mode, length = read_exact(port, 3)
@@ -812,7 +819,7 @@ def serve_pool(port, pool, trace=False, reply_delay=0, byte_delay=0):
         request = collect_request(port, inner)
         session = pool.sessions.get(handle)
         if trace:
-            print(f"RX handle={handle} command=${inner:02X}", flush=True)
+            log_message(f"RX handle={handle} command=${inner:02X}", flush=True)
         try:
             if session is None:
                 raise QDOSError(-6)
@@ -867,7 +874,7 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
             session.close()
             write_reply(port, READY_REPLY + token + b"\n", reply_delay, byte_delay)
             if trace:
-                print(f"SNL READY token={token.decode('ascii')}", flush=True)
+                log_message(f"SNL READY token={token.decode('ascii')}", flush=True)
         return
     if trace:
         names = {0x11: "OPEN", 0x12: "READ", 0x13: "WRITE", 0x04: "CLOSE",
@@ -875,12 +882,12 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
                  0x19: "FILE DATE", 0x1C: "FILE VERSION", 0x1D: "EXTENDED INFO",
                  0x1E: "RENAME", 0x1F: "TRUNCATE", 0x20: "MAKE DIRECTORY"}
     if trace:
-        print(f"RX command=${cmd:02X} {names.get(cmd, 'UNKNOWN')}", flush=True)
+        log_message(f"RX command=${cmd:02X} {names.get(cmd, 'UNKNOWN')}", flush=True)
     if cmd == 0x11:
         drive, mode, length = read_exact(port, 3)
         name = read_exact(port, length)
         if trace:
-            print(f"  drive={drive} mode={mode} name_length={length} name={name!r}", flush=True)
+            log_message(f"  drive={drive} mode={mode} name_length={length} name={name!r}", flush=True)
         try:
             if mode == 255:  # QDOS directory DELETE uses OPEN mode -1.
                 session.delete(drive, name)
@@ -893,7 +900,7 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
     elif cmd in (0x12, 0x13):
         offset, count = struct.unpack(">IH", read_exact(port, 6))
         if trace:
-            print(f"  offset={offset} count={count}", flush=True)
+            log_message(f"  offset={offset} count={count}", flush=True)
         # Consume the entire write frame even when rejecting it.
         data = read_exact(port, count) if cmd == 0x13 else None
         try:
@@ -960,32 +967,32 @@ def serve_one(port, session, trace=False, reply_delay=0, byte_delay=0):
         # Stray terminal/transfer bytes are not requests. An unsolicited error
         # here would be mistaken for the response to the next valid OPEN.
         if trace:
-            print(f"DROP unknown command=${cmd:02X}; no reply", flush=True)
+            log_message(f"DROP unknown command=${cmd:02X}; no reply", flush=True)
         return
     code = reply[0] if reply[0] < 128 else reply[0] - 256
     if trace:
-        print(f"TX command=${cmd:02X} status=${reply[0]:02X} ({code}) reply_bytes={len(reply)}", flush=True)
+        log_message(f"TX command=${cmd:02X} status=${reply[0]:02X} ({code}) reply_bytes={len(reply)}", flush=True)
     if cmd == 0x11:
         if trace:
-            print(f"  OPEN reply wire: {reply.hex(' ')}", flush=True)
+            log_message(f"  OPEN reply wire: {reply.hex(' ')}", flush=True)
     elif cmd in (0x12, 0x13):
         if trace:
-            print(f"  Reply header: {reply[:3].hex(' ')}", flush=True)
+            log_message(f"  Reply header: {reply[:3].hex(' ')}", flush=True)
     write_reply(port, reply, reply_delay=reply_delay, byte_delay=byte_delay)
     if trace:
-        print(f"Reply written for command=${cmd:02X}", flush=True)
+        log_message(f"Reply written for command=${cmd:02X}", flush=True)
 
 
 def serve_link_test(port, reply_delay=0, byte_delay=0):
     """Standalone control test; deliberately separate from the file protocol."""
     cmd = read_exact(port, 1)
     if cmd != b"~":
-        print(f"LINK TEST ignored ${cmd[0]:02X}", flush=True)
+        log_message(f"LINK TEST ignored ${cmd[0]:02X}", flush=True)
         return
     reply = b"\x00\x00\x00\x00\x17"
-    print("LINK TEST request received; reply: 00 00 00 00 17", flush=True)
+    log_message("LINK TEST request received; reply: 00 00 00 00 17", flush=True)
     write_reply(port, reply, reply_delay=reply_delay, byte_delay=byte_delay)
-    print("LINK TEST reply written", flush=True)
+    log_message("LINK TEST reply written", flush=True)
 
 
 def load_config():
@@ -1016,17 +1023,17 @@ def main():
     if reply_delay < 0 or byte_delay < 0:
         raise ValueError("Serial reply delays must be nonnegative")
     trace = config.get("trace", False)
-    print(f"SNL protocol v2 daemon on {port} at {baud} baud; drives: {list(session.drives)}", flush=True)
+    log_message(f"SNL protocol v2 daemon on {port} at {baud} baud; drives: {list(session.drives)}", flush=True)
     if trace:
-        print(f"Script: {Path(__file__).resolve()}; config: {Path(CONFIG_PATH).resolve()}; trace={trace}", flush=True)
-    print(f"Serial: 8 data bits, no parity, {settings['stopbits']} stop bits; rtscts={settings['rtscts']}", flush=True)
-    print("Readiness handshake: enabled", flush=True)
+        log_message(f"Script: {Path(__file__).resolve()}; config: {Path(CONFIG_PATH).resolve()}; trace={trace}", flush=True)
+    log_message(f"Serial: 8 data bits, no parity, {settings['stopbits']} stop bits; rtscts={settings['rtscts']}", flush=True)
+    log_message("Readiness handshake: enabled", flush=True)
     if trace or reply_delay or byte_delay:
-        print(f"Reply pacing: initial={reply_delay * 1000:g} ms, between bytes={byte_delay * 1000:g} ms", flush=True)
+        log_message(f"Reply pacing: initial={reply_delay * 1000:g} ms, between bytes={byte_delay * 1000:g} ms", flush=True)
     try:
         with serial.Serial(port, **settings) as ser:
             if "--link-test" in sys.argv[1:]:
-                print("LINK TEST ONLY: waiting for '~'; do not install SNL on the QL", flush=True)
+                log_message("LINK TEST ONLY: waiting for '~'; do not install SNL on the QL", flush=True)
                 while True:
                     serve_link_test(ser, reply_delay=reply_delay, byte_delay=byte_delay)
             else:
@@ -1035,7 +1042,7 @@ def main():
     except KeyboardInterrupt:
         pass
     except (OSError, EOFError, serial.SerialException) as exc:
-        print(f"Serial error: {exc}", file=sys.stderr)
+        log_message(f"Serial error: {exc}", file=sys.stderr)
     finally:
         session.close_all()
 
