@@ -140,7 +140,7 @@ class QimsiProfileTests(unittest.TestCase):
             return original_put(operand, value, width)
         cpu.put = watched_put
         self.assertEqual(cpu.run("ini_mbuf")[0], 0)
-        self.assertEqual(bytes(cpu.mem[0x942:0x94A]), bytes.fromhex("1010041004040c0c"))
+        self.assertEqual(bytes(cpu.mem[0x942:0x94A]), bytes.fromhex("1010000004040c0c"))
         self.assertEqual(writes, [0x2700] * 4)
         self.assertEqual(cpu.reg["sr"], 0)
         self.assertEqual({r: cpu.reg[r] for r in saved}, saved)

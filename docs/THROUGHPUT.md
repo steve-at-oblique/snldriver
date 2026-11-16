@@ -173,3 +173,55 @@ consistent with run-to-run variation at whole-second timing resolution.
 Six channel-diagnostic runs passed on QIMSI and six on stock QL/TK2. V2.36
 retains header batching on both transports and supplies actual elapsed frame
 counts to the stock ROM transmit service.
+
+
+## V2.38 QIMSI Gold / Minerva4Q68
+
+The user reported **PASS: final payload and memory guards verified** with
+20 x 256 KiB per timed batch:
+
+| System / measurement | Write seconds | Write KiB/s | Read seconds | Read KiB/s |
+| --- | --- | --- | --- | --- |
+| Minerva4Q68 / V2.38 | 179 | 28.60335 | 42 | 121.9048 |
+| SMSQ/E / earlier V2.36 baseline | 40 | 128 | 60 | 85.3333 |
+
+For Minerva with TK2, the user was instructed to replace POKE$ at lines 120
+and 210 in the QL-side copy with ordinary byte-POKE loops, and use reps=20.
+Both preparation loops are outside the timed regions; the repository's
+`tests/ql/snl_throughput_bas` remains unchanged at the user's request.
+The timed overwrite saves, binary loads and final integrity checks are the
+same operations. The user confirmed trace was off, channel statistics were
+on, and the target was SNL6. Display mode and the earlier SMSQ/E host folder
+were not confirmed, so this is a comparison of observed results, not a
+controlled isolation of OS/serial-driver overhead.
+
+Observed Minerva writes were about 4.5 times slower than the earlier SMSQ/E
+measurement, while reads were about 43% faster. SNL's Minerva profile uses
+1,024-byte transmit and 4,096-byte receive buffers in the native serial driver.
+The transmit path is a candidate for investigation; the benchmark does not
+by itself establish the cause of the write slowdown.
+
+## V2.39 QIMSI Gold / Minerva4Q68 direct transmit
+
+V2.39 selects the equivalent of `SER_BUFF 2,0,4096` automatically: no
+transmit queue, retaining the 4,096-byte receive queue and its thresholds.
+The change applies only to the validated native Minerva USB driver.
+
+The user assembled the supplied binary and reported banner, DIR, channel
+and binary round-trip tests passing. The throughput test passed final payload
+and memory-guard verification. Two runs produced identical timings, each
+transferring 20 x 256 KiB (5 MiB) per direction on SNL6 with trace off:
+
+| Version | Write seconds | Write KiB/s | Read seconds | Read KiB/s |
+| --- | --- | --- | --- | --- |
+| V2.38 buffered transmit | 179 | 28.60335 | 42 | 121.9048 |
+| V2.39 direct transmit, run 1 | 10 | 512 | 39 | 131.2821 |
+| V2.39 direct transmit, run 2 | 10 | 512 | 39 | 131.2821 |
+
+Write throughput improved by approximately 17.9 times. Whole-second timing
+limits precision, particularly for the ten-second writes. These hardware
+results strongly identify Minerva's buffered transmit path as the write
+bottleneck. The repository benchmark source remains unchanged; the user used
+the Minerva-compatible preparation loops described above. V2.39-specific
+missing-daemon recovery and cross-platform hardware regressions have not yet
+been reported; the corresponding V2.38 results remain documented separately.

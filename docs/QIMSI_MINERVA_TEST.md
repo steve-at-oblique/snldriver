@@ -1,6 +1,6 @@
-# V2.38: QIMSI Gold USB under Minerva4Q68
+# V2.39: QIMSI Gold USB under Minerva4Q68
 
-The source and supplied `bin/snldriver238_bin` are V2.38. The 5,296-byte
+The source and supplied `bin/snldriver239_bin` are V2.39. The 5,296-byte
 binary was assembled and hardware-tested by the user. No daemon protocol or configuration change is
 required. The separately tested daemon shutdown logging fix remains compatible.
 V2.37 passed installation/DIR, channel diagnostic revision 5, binary round
@@ -12,8 +12,8 @@ tests passed.
 
 QIMSI Gold running Jan Bredenbeek's Minerva4Q68, based on Minerva 1.98,
 with its native SER2 USB driver (Minerva4Q68 v1.80 or newer and QIMSI Gold
-firmware v1.20 or newer). V2.38 automatically configures the equivalent of
-`SER_BUFF 2,1024,4096` before opening SER2. No BASIC setup command is needed.
+firmware v1.20 or newer). V2.39 automatically configures the equivalent of
+`SER_BUFF 2,0,4096` before opening SER2. No BASIC setup command is needed.
 
 The default zero-buffer USB receive path hung both a native BASIC probe and
 the initial SNL test on the user's machine. Buffered I/O passed; the precise
@@ -95,20 +95,20 @@ Talent assembly and hardware validation.
 ## Build and hardware test
 
 1. Assemble the updated self-contained `SNLdriver_asm` using Talent/Quanta
-   2.02. Save the binary separately as `snldriver238_bin`. Do not reuse the
+   2.02. Save the binary separately as `snldriver239_bin`. Do not reuse the
    fixed 5,100-byte reservation: the new source is larger. Reserve memory
    according to the actual assembled file length, for example with TK2:
 
    ```basic
-   base=RESPR(FLEN("win1_snldriver238_bin")+14)
-   LBYTES win1_snldriver238_bin,base
+   base=RESPR(FLEN("win1_snldriver239_bin")+14)
+   LBYTES win1_snldriver239_bin,base
    CALL base
    ```
 
    Enter Minerva4Q68 from a fresh boot and omit the manual SER_BUFF command
-   when testing V2.38. Use RESPR(6000) if TK2/FLEN is not available, checking
+   when testing V2.39. Use RESPR(6000) if TK2/FLEN is not available, checking
    the assembled size fits. Load TK2 v2.36 for
-   the supplied BASIC diagnostic programs. Expect the V2.38 banner, with
+   the supplied BASIC diagnostic programs. Expect the V2.39 banner, with
    neither the ROM-task error nor an installation error. Use the same
    `/dev/ttyACM0` daemon settings used for QIMSI/SMSQ/E, with rtscts false.
 
@@ -212,3 +212,10 @@ binary round trip and WCOPY: **all PASS**.
 Together with the Minerva results, this completes the planned V2.38
 hardware validation. The original QDOS and SMSQ/E transport paths retain
 their working behavior alongside automatic Minerva USB buffer setup.
+
+## V2.39 direct-transmit hardware results
+
+Banner, DIR, channel diagnostics and binary round trip passed under Minerva.
+Two 20-repetition throughput runs each reported write 10 seconds / 512 KiB/s
+and read 39 seconds / 131.2821 KiB/s, with final payload and memory guards
+verified. See [throughput results](THROUGHPUT.md) for the comparison.

@@ -31,7 +31,7 @@
 ; Applies to Steve Jennen's original contributions. Existing third-party
 ; copyright and redistribution notices are retained at the end of this file.
 ;
-; Version       : 2.38 (automatic Minerva USB buffers)
+; Version       : 2.39 (Minerva USB direct transmit)
 ; Wire protocol : SNL v2, with readiness handshake and directory support
 ; Target        : Sinclair QL / Motorola 68000 instruction set
 ; Assembler     : Talent/Quanta Assembler 2.02
@@ -163,7 +163,7 @@ boot_err bsr      dbg_boot
          rts
 
 banner   dc.w     67                        ; text bytes only; exclude Talent alignment padding
-         dc.b     'SNL Device driver V2.38 - BSD-2-Clause',10
+         dc.b     'SNL Device driver V2.39 - BSD-2-Clause',10
          dc.b     'Copyright 2026 Steve Jennen',10
 ban_end  equ      *
          dc.b     0                         ; word alignment
@@ -425,7 +425,7 @@ ini_mchk cmpi.l   #$53455232,$22(a1)        ; sp_name: 'SER2'
 im_no    moveq    #err.ni,d0
          rts
 
-; Equivalent to SER_BUFF 2,1024,4096 for the validated native USB driver.
+; Equivalent to SER_BUFF 2,0,4096 for the validated native USB driver.
 ; Use Minerva MT.EXTOP to update its defaults atomically in supervisor mode.
 ; Refuse an already-open port; no existing queues or channels are modified.
 ini_mbuf movem.l  d1-d3/a0-a3,-(a7)
@@ -450,7 +450,7 @@ mb_found tst.l    $36(a1)                   ; sp_rxch (base+$4E)
          bne      mb_busy
          tst.l    $3A(a1)                   ; sp_txch (base+$52)
          bne      mb_busy
-         move.w   #$0410,$44(a1)            ; 1024-byte TX queue + 16-byte header
+         move.w   #0,$44(a1)                ; direct TX; retain buffered RX below
          move.w   #$1010,$42(a1)            ; 4096-byte RX queue + 16-byte header
          move.w   #$0404,$46(a1)            ; same quarter/three-quarter thresholds
          move.w   #$0C0C,$48(a1)            ; as SER_BUFF; SER2I disables flow control

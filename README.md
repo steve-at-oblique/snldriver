@@ -5,8 +5,8 @@ another computer over serial or USB serial. Use familiar QL commands while
 the host's Python daemon handles storage. Files are immediately available
 from both computers, without copying them into an SD-card container.
 
-The current release is **v2.38**. The supplied
-[snldriver238_bin](bin/snldriver238_bin) is 5,296 bytes.
+The current release is **v2.39**. The supplied
+[snldriver239_bin](bin/snldriver239_bin) is 5,296 bytes.
 
 ## Features
 
@@ -43,7 +43,7 @@ The driver has been hardware-tested on:
 | --- | --- | --- |
 | Stock 128K QL with QDOS | Built-in SER2 | Toolkit II adds commands used by the extended file-operation tests. |
 | QIMSI Gold with SMSQ/E | USB serial | Uses the native USB serial driver. |
-| QIMSI Gold with Minerva4Q68 | USB serial | Automatically configures transmit/receive buffers; no manual SER_BUFF command is needed. |
+| QIMSI Gold with Minerva4Q68 | USB serial | Uses direct transmit and automatically configures the receive buffer; no manual SER_BUFF command is needed. |
 
 Minerva4Q68 support targets its Minerva 1.98-based build with native SER2
 USB support, on QIMSI Gold firmware v1.20 or newer. Other Minerva
@@ -162,7 +162,7 @@ Load the supplied binary into reserved memory and install it with CALL:
 
 ```basic
 base=RESPR(6000)
-LBYTES win1_snldriver238_bin,base
+LBYTES win1_snldriver239_bin,base
 CALL base
 ```
 
@@ -170,7 +170,7 @@ Substitute the device where you stored the binary. These lines can also go
 in your SuperBASIC BOOT program. With Toolkit II, you can instead use:
 
 ```basic
-LRESPR win1_snldriver238_bin
+LRESPR win1_snldriver239_bin
 ```
 
 For direct serial delivery of the binary, see the
