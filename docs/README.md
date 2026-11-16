@@ -1,12 +1,17 @@
 # Documentation
 
-Start with the [project README](../README.md) for the V2.36 release binary
+Start with the [project README](../README.md) for the V2.38 release binary
 and tested operations. Run commands from the repo root unless a guide
 explicitly says otherwise.
 
-Current source and release binary are V2.36, validated on stock QL/TK2 and QIMSI.
+Current source and release binary are V2.38. Hardware tests passed on stock
+QL/TK2, QIMSI/SMSQ/E and QIMSI/Minerva4Q68; see the Minerva guide for the
+scope of the tests and automatic USB buffer configuration.
 
 ## Practical guides
+
+- [V2.38 QIMSI Gold / Minerva4Q68](QIMSI_MINERVA_TEST.md): USB transport
+  selection, native system stack, installation and hardware checks.
 
 - [V2.36 batched channel headers](BATCHED_CHANNEL_HEADERS.md): header batching and frame-timed stock ROM service, integrity checks and 20-repetition timing.
 

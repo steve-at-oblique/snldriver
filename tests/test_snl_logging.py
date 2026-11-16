@@ -3,6 +3,8 @@ import contextlib
 import datetime
 import io
 import sys
+import subprocess
+from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -63,3 +65,32 @@ class LoggingTests(unittest.TestCase):
         self.assertTrue(all(line.startswith(self.prefix) for line in output.getvalue().splitlines()))
         self.assertEqual(errors.getvalue(), self.prefix + "Serial error: unavailable\n" + self.prefix + "check cable\n")
         self.assertIn("SNL protocol v2 daemon", output.getvalue())
+
+
+    def test_closed_log_pipe_does_not_interrupt_session_cleanup(self):
+        class BrokenOutput(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError(32, "Broken pipe")
+        with tempfile.TemporaryDirectory() as folder:
+            pool = snl.SessionPool({"1": folder}, statistics=False)
+            pool.open(1, 2, b"first")
+            pool.open(1, 2, b"second")
+            files = [session.file for session in pool.sessions.values()]
+            pool.statistics = True
+            with contextlib.redirect_stdout(BrokenOutput()):
+                pool.close_all()
+            self.assertFalse(pool.sessions)
+            self.assertTrue(all(file.closed for file in files))
+            self.assertEqual(pool.closes, 2)
+
+    def test_closed_stdout_pipe_exits_without_final_flush_traceback(self):
+        daemon = str(Path(snl.__file__).resolve())
+        code = ("import runpy; m=runpy.run_path(" + repr(daemon) + "); "
+                "m['log_message']('shutdown summary'); m['log_message']('done')")
+        process = subprocess.Popen([sys.executable, "-c", code],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process.stdout.close()
+        errors = process.stderr.read()
+        process.stderr.close()
+        self.assertEqual(process.wait(timeout=10), 0, errors.decode())
+        self.assertEqual(errors, b"")

@@ -122,6 +122,8 @@ class CacheCPU:
         if not m:
             if re.fullmatch(r"\$[0-9a-f]+|[0-9]+", operand):
                 return self.number(operand)
+            if operand in self.labels:
+                return self.labels[operand]
             raise AssertionError(f"Unsupported addressing: {operand}")
         pre, offset, reg, post = m.groups()
         if pre and offset:
@@ -360,6 +362,9 @@ class CacheCPU:
             width = {"b": 1, "w": 2, "l": 4}[size]
             if op == "rts":
                 pc = self.get("(a7)+", 4)
+            elif op == "rte":
+                self.reg["sr"] = self.get("(a7)+", 2)
+                pc = self.get("(a7)+", 4)
             elif op == "movem":
                 if args[1] == "-(a7)":
                     regs = self.register_list(args[0])
@@ -397,6 +402,13 @@ class CacheCPU:
             elif op == "trap":
                 assert args == ["#1"]
                 call = self.reg["d0"]
+                if call == 3:  # MT.EXTOP returns through a real SR/PC frame
+                    saved_sr = self.reg.get("sr", 0)
+                    self.put("-(a7)", pc, 4)
+                    self.put("-(a7)", saved_sr, 2)
+                    self.reg["sr"] = saved_sr | 0x2000
+                    pc = self.reg["a2"]
+                    continue
                 if call == 0x13:
                     self.reg["d1"] = int(self.clock)
                     self.clock += self.clock_step
@@ -441,8 +453,9 @@ class CacheCPU:
                 self.put(args[0], value, 2)
                 if value != 0xFFFF:
                     pc = self.labels[args[1]]
-            elif op == "andi":
-                value = self.get(args[0], width) & self.get(args[1], width)
+            elif op in ("andi", "ori"):
+                left, right = self.get(args[0], width), self.get(args[1], width)
+                value = left & right if op == "andi" else left | right
                 self.put(args[1], value, width)
                 self.flags(value, width)
             elif op == "rol":

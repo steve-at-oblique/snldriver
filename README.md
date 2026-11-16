@@ -8,21 +8,29 @@ using familiar QL commands. SNL uses SER2 on the QL and a Python daemon on
 the host computer. Hardware testing so far has used a Linux host; Windows
 and Raspberry Pi host setups have not yet been validated for this release.
 
-**V2.36:** V2.36 batches READ/WRITE headers on both transports and corrects
+**V2.38:** adds QIMSI Gold / Minerva4Q68 USB support
+and automatically configures the serial buffers. V2.37 passed DIR, channel,
+binary and game-launch tests with manual buffering. V2.38 passed missing-daemon
+recovery, channel and binary tests with automatic buffering under Minerva,
+and the stock QL/TK2 and QIMSI/SMSQ/E regressions passed. See the
+[Minerva test plan](docs/QIMSI_MINERVA_TEST.md).
+
+**V2.36:** batches READ/WRITE headers on both transports and corrects
 the elapsed-frame count passed to the stock ROM transmit service. Six channel-diagnostic runs passed on each of stock QL/TK2 and QIMSI.
 QIMSI throughput measured 128 KiB/s writing and 85.3333 KiB/s reading. See the [performance test plan](docs/BATCHED_CHANNEL_HEADERS.md).
 
 The V2.33 release supports multiple channels,
 a separate 512-byte cache per channel, and daemon channel statistics. See the
 [multi-channel hardware test plan](docs/MULTIPLE_CHANNELS.md).
-The supplied binary is the hardware-tested V2.36 release, including Level-2
+The supplied binary is the hardware-tested V2.38 release, including Level-2
 directories. See the [directory test results](docs/LEVEL2_DIRECTORIES.md).
 
-The release binary is [snldriver236_bin](bin/snldriver236_bin), assembled with
-Talent/Quanta Assembler 2.02 from the V2.36 source. Functional regression
+The release binary is [snldriver238_bin](bin/snldriver238_bin), assembled with
+Talent/Quanta Assembler 2.02 from the V2.38 source. Functional regression
 tests passed on a stock 128K QL running QDOS and on QIMSI Gold USB running
 SMSQ/E; stock-QL Unzip and INCLUDE assembly tests were limited by memory.
-Minerva remains unverified for this release.
+QIMSI Gold / Minerva4Q68 is validated for DIR, channels, binary transfers and
+missing-daemon recovery; other Minerva configurations remain unverified.
 
 V2.28 includes bulk transfers, aligned read-cache copies and batched READ
 headers, with 512-byte payloads and no profiling instrumentation. It also fixes
@@ -42,7 +50,7 @@ workflows. The QL can assemble SNL itself and save its new binary through SNL.
 ## Repository layout
 
 ```text
-bin/              Release binary (snldriver236_bin)
+bin/              Release binary (snldriver238_bin)
 SNLdriver_asm      Self-contained QL assembly source
 snl_serial         Python serial filesystem daemon
 snl_config.json    Shareable configuration with relative drive paths
@@ -153,7 +161,7 @@ Restart the daemon after config changes.
 
 ## QL installation and use
 
-Use `bin/snldriver236_bin` (5,012 bytes) with the matching updated daemon.
+Use `bin/snldriver238_bin` (5,296 bytes) with the matching updated daemon.
 The self-contained source assembles with Talent/Quanta 2.02.
 Load it into reserved memory and install it with CALL, not EXEC. See the
 [binary serial bootstrap guide](docs/BINARY_BOOTSTRAP.md) for a direct LBYTES

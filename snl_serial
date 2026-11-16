@@ -25,7 +25,19 @@ def log_message(message, *, file=None, flush=True):
     """Prefix each console line with the host's local date/time to seconds."""
     timestamp = datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")
     for line in str(message).splitlines() or [""]:
-        print(f"{timestamp} {line}", file=file, flush=flush)
+        try:
+            print(f"{timestamp} {line}", file=file, flush=flush)
+        except BrokenPipeError:
+            # Ctrl-C can stop tee before our finally block prints its summary.
+            # Logging must not interrupt file/session cleanup. Redirect the
+            # broken descriptor so Python's final buffered flush is safe too.
+            stream = sys.stdout if file is None else file
+            try:
+                with open(os.devnull, "w") as sink:
+                    os.dup2(sink.fileno(), stream.fileno())
+            except (AttributeError, OSError, ValueError):
+                pass  # In-memory/custom output streams may have no descriptor.
+            return
 
 
 def read_ready_probe(port):

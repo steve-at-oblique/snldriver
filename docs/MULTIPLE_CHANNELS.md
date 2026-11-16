@@ -1,9 +1,10 @@
 # V2.33: multiple channels and daemon statistics
 
-The current distributed release is `bin/snldriver236_bin` (5,012 bytes), with
+The current distributed release is `bin/snldriver238_bin` (5,296 bytes), with
 the matching updated daemon. The original V2.33 hardware results and test
 plan are recorded below; see [V2.36 validation](BATCHED_CHANNEL_HEADERS.md)
-for header batching, stock ROM timing, and current performance results. V2.32 was the
+for header batching, stock ROM timing, and performance results.
+[V2.38 validation](QIMSI_MINERVA_TEST.md) adds Minerva4Q68 USB support. V2.32 was the
 initial multi-channel candidate; V2.33 corrects directory-scan identities for
 SNL-to-SNL WCOPY.
 

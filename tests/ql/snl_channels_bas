@@ -1,6 +1,6 @@
-10 REMark SNL V2.36 + Toolkit II or SMSQ/E; two disposable fresh names
-15 PRINT "SNL channel diagnostics revision 4"
-20 testsrc$="snl1_mc236_src": testdst$="snl1_mc236_dst"
+10 REMark SNL V2.38 + Toolkit II or SMSQ/E; two disposable fresh names
+15 PRINT "SNL channel diagnostics revision 6"
+20 testsrc$="snl1_mc238_src": testdst$="snl1_mc238_dst"
 30 count=1537: bad=0
 40 OPEN_NEW #3,testsrc$
 50 FOR i=0 TO count-1

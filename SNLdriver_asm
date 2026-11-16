@@ -31,7 +31,7 @@
 ; Applies to Steve Jennen's original contributions. Existing third-party
 ; copyright and redistribution notices are retained at the end of this file.
 ;
-; Version       : 2.36 (batched headers and frame-timed ROM service)
+; Version       : 2.38 (automatic Minerva USB buffers)
 ; Wire protocol : SNL v2, with readiness handshake and directory support
 ; Target        : Sinclair QL / Motorola 68000 instruction set
 ; Assembler     : Talent/Quanta Assembler 2.02
@@ -163,7 +163,7 @@ boot_err bsr      dbg_boot
          rts
 
 banner   dc.w     67                        ; text bytes only; exclude Talent alignment padding
-         dc.b     'SNL Device driver V2.36 - BSD-2-Clause',10
+         dc.b     'SNL Device driver V2.38 - BSD-2-Clause',10
          dc.b     'Copyright 2026 Steve Jennen',10
 ban_end  equ      *
          dc.b     0                         ; word alignment
@@ -172,7 +172,7 @@ ban_end  equ      *
 ; SNL per-channel state
 ; ----------------------------------------------------------------------------
 
-; Per-channel state in $70..$9B, within the common $70..$9F spare area.
+; Per-channel state in $70..$9D, within the common $70..$9F spare area.
 ; SMSQ/E owns $58..$6F: never store private state there. No slave blocks.
 
 snl_chid equ      fs_spare                  ; long: permanent serial channel ID
@@ -237,10 +237,17 @@ ini_clr  clr.l    (a1)+
          trap     #1
          bsr      ini_prof
          bne      ini_free                  ; unsupported SMSQ/E machine: no port opened
-         lea      snl_ser,a0                ; original QL / Minerva transport
+         cmpi.b   #2,$61(a4)
+         bne      ini_port
+         bsr      ini_mbuf                  ; configure native USB queues before OPEN
+         bne      ini_free
+ini_port lea      snl_ser,a0                ; original QL / Minerva transport
          tst.b    $61(a4)
          beq      ini_open
-         lea      snl_usb,a0                ; QIMSI Gold USB CDC, raw, no flow control
+         lea      snl_usb,a0                ; SMSQ/E USB: raw, no flow control
+         cmpi.b   #2,$61(a4)
+         bne      ini_open
+         lea      snl_musb,a0               ; Minerva4Q68 accepts SER2I (max 6 chars)
 ini_open moveq    #0,d1                     ; serial channel belongs to job zero
          moveq    #0,d3
          moveq    #io.open,d0
@@ -261,31 +268,17 @@ ini_open moveq    #0,d1                     ; serial channel belongs to job zero
          adda.l   d0,a1
          move.l   (a1),$50(a4)              ; permanent serial CDB
 
-; SMSQ/E SPP I/O activates its own TX interrupts on every output operation.
-; Use the private stack: Q68 traps/IRQs obtain sysvars from sms.sysb, not SP.
-; Do not scan or invoke the original QL ROM scheduler on this transport.
+; USB drivers handle their own FIFO/interrupts. Minerva must retain its
+; native stack, selected in ini_prof; SMSQ/E uses our private stack.
+; Validate the Minerva SER2 linkage before bypassing the ROM-task scan.
 
-         tst.b    $61(a4)
+         cmpi.b   #2,$61(a4)
+         bne      ini_usb
+         bsr      ini_mser
+         bne      ini_drop
+ini_usb  tst.b    $61(a4)
          bne      ini_link                  ; $54 remains zero: no ROM transmit callback
 
-; Minerva derives the system-variable base from the supervisor stack.
-; Its expanded system stack must remain active during traps/interrupts.
-; Recognize the exact MT.TRAP prologue from the supplied 1.98a1 ROM.
-; Linkage+$60 is nonzero only for this validated stack convention.
-
-         move.l   $84,a2                    ; TRAP #1 vector
-         move.l   a2,d0
-         btst     #0,d0
-         bne      ini_host
-         cmpi.l   #$BFF4,d0
-         bhi      ini_host
-         cmpi.l   #$48E70106,(a2)           ; MOVEM.L D7/A5-A6,-(A7)
-         bne      ini_host
-         cmpi.l   #$2E0F0247,4(a2)          ; MOVE.L A7,D7 / ANDI.W
-         bne      ini_host
-         cmpi.l   #$80002C47,8(a2)          ; #$8000,D7 / MOVEA.L D7,A6
-         bne      ini_host
-         st       $60(a4)                   ; use Minerva's system stack
 ini_host move.l   $50(a4),a1
 
 ; sQLux host serial I/O writes directly to Linux and needs no ROM kick.
@@ -368,23 +361,103 @@ ini_ret  movem.l  (a7)+,d1-d3/a0-a4
          tst.l    d0
          rts
 
-; Select only the audited SMSQ/E QIMSI Gold profile. Other SMSQ/E targets
-; fail closed rather than falling through to original QL ROM assumptions.
-; A0=sysvars, A4=cleared linkage. Preserve A0/A4; D1 is scratch.
-; $60: Minerva native-stack policy; $61: QIMSI USB transport profile.
+; Select audited QIMSI Gold USB profiles. Other SMSQ/E targets fail closed.
+; Minerva4Q68 requires its known trap prologue, MT.INF version and machine ID.
+; A0=sysvars, D2=MT.INF version, A4=cleared linkage. Scratch D1/A2.
+; $60: native Minerva stack; $61: 0=legacy, 1=SMSQ/E USB, 2=Minerva USB.
 
 ini_prof cmpi.l   #smsq_id,sv_idnt(a0)
-         bne      ip_old
+         bne      ip_minq
          moveq    #0,d1
          move.b   sv_mtyp(a0),d1
-         andi.w   #$1F,d1                   ; same machine-ID mask as MACHINE
+         andi.w   #$1F,d1
          cmpi.w   #qimsi_id,d1
          bne      ip_no
-         st       $61(a4)
+         move.b   #1,$61(a4)
+         bra      ip_old
+ip_minq  move.l   $84,a2                    ; recognize native Minerva trap stack
+         move.l   a2,d1
+         beq      ip_old
+         btst     #0,d1
+         bne      ip_old
+         cmpi.l   #$BFF4,d1
+         bhi      ip_old
+         cmpi.l   #$48E70106,(a2)
+         bne      ip_old
+         cmpi.l   #$2E0F0247,4(a2)
+         bne      ip_old
+         cmpi.l   #$80002C47,8(a2)
+         bne      ip_old
+         st       $60(a4)
+         cmpi.l   #$312E3938,d2             ; MT.INF '1.98'
+         beq      ip_mach
+         cmpi.l   #$31473938,d2             ; alternative '1G98' image
+         bne      ip_old
+ip_mach  moveq    #0,d1
+         move.b   sv_mtyp(a0),d1            ; Q68 extension sets this at startup
+         andi.w   #$1F,d1
+         cmpi.w   #qimsi_id,d1
+         bne      ip_old
+         move.b   #2,$61(a4)
 ip_old   moveq    #0,d0
          rts
 ip_no    moveq    #err.ni,d0
          rts
+
+; q68ser.asm v1.12 linkage layout, relative to access link (base+$18).
+; Check SER2 identity, physical USB FIFO base, and basic-I/O dispatch entry.
+; No hardware reads and no borrowed ROM scheduler callbacks.
+ini_mser move.l   $50(a4),a1
+         move.l   ch_drivr(a1),a1
+ini_mchk cmpi.l   #$53455232,$22(a1)        ; sp_name: 'SER2'
+         bne      im_no
+         cmpi.l   #$1C228,$3E(a1)           ; sp_iobas: USB UART status register
+         bne      im_no
+         move.l   4(a1),a2
+         move.l   a2,d1
+         beq      im_no
+         btst     #0,d1
+         bne      im_no
+         cmpi.l   #$0C000007,(a2)           ; ser_io: CMPI.B #IO.SSTRG,D0
+         bne      im_no
+         moveq    #0,d0
+         rts
+im_no    moveq    #err.ni,d0
+         rts
+
+; Equivalent to SER_BUFF 2,1024,4096 for the validated native USB driver.
+; Use Minerva MT.EXTOP to update its defaults atomically in supervisor mode.
+; Refuse an already-open port; no existing queues or channels are modified.
+ini_mbuf movem.l  d1-d3/a0-a3,-(a7)
+         lea      mb_setup,a2
+         moveq    #3,d0                     ; MT.EXTOP (callback returns with RTE)
+         trap     #1
+         movem.l  (a7)+,d1-d3/a0-a3
+         tst.l    d0
+         rts
+mb_setup ori.w    #$0700,sr
+         move.l   $44(a0),a1                ; SV.DRLST access links
+         moveq    #31,d3
+mb_scan  move.l   a1,d0
+         beq      mb_nf
+         bsr      ini_mchk
+         beq      mb_found
+         move.l   (a1),a1
+         dbra     d3,mb_scan
+mb_nf    moveq    #err.ni,d0
+         bra      mb_done
+mb_found tst.l    $36(a1)                   ; sp_rxch (base+$4E)
+         bne      mb_busy
+         tst.l    $3A(a1)                   ; sp_txch (base+$52)
+         bne      mb_busy
+         move.w   #$0410,$44(a1)            ; 1024-byte TX queue + 16-byte header
+         move.w   #$1010,$42(a1)            ; 4096-byte RX queue + 16-byte header
+         move.w   #$0404,$46(a1)            ; same quarter/three-quarter thresholds
+         move.w   #$0C0C,$48(a1)            ; as SER_BUFF; SER2I disables flow control
+         moveq    #0,d0
+         bra      mb_done
+mb_busy  moveq    #err.iu,d0
+mb_done  rte                               ; restore caller's saved interrupt state
 
 ; ----------------------------------------------------------------------------
 ; Directory driver OPEN and DELETE entry
@@ -1814,6 +1887,8 @@ snl_ni   moveq    #err.ni,d0
          rts
 snl_ser  dc.w     5
          dc.b     'SER2H',0
+snl_musb dc.w     5
+         dc.b     'SER2I',0
 snl_usb  dc.w     7
          dc.b     'SER2IDR',0
 
