@@ -1,97 +1,85 @@
-# SNL — serial filesystem for the Sinclair QL
+# SNL — Serial Network Link for the Sinclair QL
 
-SNL is a host-backed file storage driver for the Sinclair QL. It lets your QL
-use another computer as external file storage over a serial or USB serial
-connection. Possible hosts include Windows PCs, Linux PCs, and Raspberry Pi
-systems running Linux. Load, save and run files directly from host directories
-using familiar QL commands. SNL uses SER2 on the QL and a Python daemon on
-the host computer. Hardware testing so far has used a Linux host; Windows
-and Raspberry Pi host setups have not yet been validated for this release.
+SNL lets a Sinclair QL load, save and run files directly from folders on
+another computer over serial or USB serial. Use familiar QL commands while
+the host's Python daemon handles storage. Files are immediately available
+from both computers, without copying them into an SD-card container.
 
-**V2.38:** adds QIMSI Gold / Minerva4Q68 USB support
-and automatically configures the serial buffers. V2.37 passed DIR, channel,
-binary and game-launch tests with manual buffering. V2.38 passed missing-daemon
-recovery, channel and binary tests with automatic buffering under Minerva,
-and the stock QL/TK2 and QIMSI/SMSQ/E regressions passed. See the
-[Minerva test plan](docs/QIMSI_MINERVA_TEST.md).
+The current release is **v2.38**. The supplied
+[snldriver238_bin](bin/snldriver238_bin) is 5,296 bytes.
 
-**V2.36:** batches READ/WRITE headers on both transports and corrects
-the elapsed-frame count passed to the stock ROM transmit service. Six channel-diagnostic runs passed on each of stock QL/TK2 and QIMSI.
-QIMSI throughput measured 128 KiB/s writing and 85.3333 KiB/s reading. See the [performance test plan](docs/BATCHED_CHANNEL_HEADERS.md).
+## Features
 
-The V2.33 release supports multiple channels,
-a separate 512-byte cache per channel, and daemon channel statistics. See the
-[multi-channel hardware test plan](docs/MULTIPLE_CHANNELS.md).
-The supplied binary is the hardware-tested V2.38 release, including Level-2
-directories. See the [directory test results](docs/LEVEL2_DIRECTORIES.md).
+- BASIC LOAD/SAVE, binary LBYTES/SBYTES, executable loading and DELETE.
+- Multiple open channels, including SNL-to-SNL COPY/WCOPY, Unzip and
+  assembly with include files. Each channel has its own 512-byte buffer.
+- Bulk reads and writes, read-ahead caching and batched request headers.
+- Level-2 subdirectories, directory creation, directory listings and prefix
+  filtering, such as `DIR snl6_s`.
+- Rename and truncate.
+- QDOS file headers, file dates/timestamps, file-version query/set and
+  extended medium information. QL Unzip can restore archived file dates.
+- Case-insensitive filename lookup that preserves the stored spelling.
+- Up to eight drive mappings, each pointing to a host folder. Mounted
+  network shares can be used just like local folders.
+- Recovery from a missed daemon startup: start the daemon and retry the
+  failed command.
+- Timestamped daemon output and optional OPEN/CLOSE statistics showing
+  current and peak channel counts.
 
-The release binary is [snldriver238_bin](bin/snldriver238_bin), assembled with
-Talent/Quanta Assembler 2.02 from the V2.38 source. Functional regression
-tests passed on a stock 128K QL running QDOS and on QIMSI Gold USB running
-SMSQ/E; stock-QL Unzip and INCLUDE assembly tests were limited by memory.
-QIMSI Gold / Minerva4Q68 is validated for DIR, channels, binary transfers and
-missing-daemon recovery; other Minerva configurations remain unverified.
+The QL can load its monitor and assembler through SNL, assemble the SNL
+source, and save the resulting binary directly onto the host or a shared
+network folder.
 
-V2.28 includes bulk transfers, aligned read-cache copies and batched READ
-headers, with 512-byte payloads and no profiling instrumentation. It also fixes
-the stock QL timeout caused by queued READ request bytes needing ROM serial
-servicing while waiting for a reply. The 1024-byte buffer experiment was
-reverted after it showed no measured benefit.
+Measured QIMSI Gold USB throughput is approximately **128 KiB/s writing**
+and **85.3 KiB/s reading**. See [throughput measurements](docs/THROUGHPUT.md)
+for the benchmark conditions and detailed results.
 
-QIMSI Gold USB throughput testing in Large QL Mode 4 passed at **116.36 KiB/s
-writing** and **85.33 KiB/s reading**. See the
-[performance guide](docs/PERFORMANCE_BUILD.md) and
-[QIMSI test history](docs/QIMSI_SMSQE_TEST.md) for test details.
+## Supported systems
 
-Verified operations include BASIC LOAD/SAVE, binary LBYTES/SBYTES, executable
-loading, DIR, DELETE, and the QL Monitor/assembler and Toolkit II overwrite
-workflows. The QL can assemble SNL itself and save its new binary through SNL.
+The driver has been hardware-tested on:
 
-## Repository layout
+| QL system | Connection | Notes |
+| --- | --- | --- |
+| Stock 128K QL with QDOS | Built-in SER2 | Toolkit II adds commands used by the extended file-operation tests. |
+| QIMSI Gold with SMSQ/E | USB serial | Uses the native USB serial driver. |
+| QIMSI Gold with Minerva4Q68 | USB serial | Automatically configures transmit/receive buffers; no manual SER_BUFF command is needed. |
 
-```text
-bin/              Release binary (snldriver238_bin)
-SNLdriver_asm      Self-contained QL assembly source
-snl_serial         Python serial filesystem daemon
-snl_config.json    Shareable configuration with relative drive paths
-tools/             Host transfer and verification utilities
-tests/             Python regression tests
-  ql/              BASIC programs for hardware tests
-  fixtures/        Sample input used by regression tests
-docs/              Protocol, installation, tests and development notes
-reference/         Original sources and superseded experiments
-```
+Minerva4Q68 support targets its Minerva 1.98-based build with native SER2
+USB support, on QIMSI Gold firmware v1.20 or newer. Other Minerva
+configurations remain unverified. See the [Minerva guide](docs/QIMSI_MINERVA_TEST.md)
+for the supported configuration and hardware results.
 
-The assembly constants are already in `SNLdriver_asm`. No separate include
-file is needed, and SYM output is disabled so assembly can use one SNL file
-at a time. Retained reference sources are not build inputs.
+Possible hosts include Windows PCs, Linux PCs and Raspberry Pi systems
+running Linux. Host-side hardware testing has used Linux; Windows and
+Raspberry Pi operation still require validation. Windows RENAME of an open
+file is a known compatibility concern.
 
 ## Host setup
 
-Install Python 3 and pyserial on the host. Run the daemon from the repository
-root so it finds `snl_config.json`. Choose the included configuration for
-your interface, then edit its serial port and drive paths for your computer:
+Install Python 3 and pyserial. Run the daemon from the repository root so it
+finds `snl_config.json`. Choose the configuration for your connection, then
+edit its serial port and drive paths:
 
 | Connection | Linux / Raspberry Pi OS example | Windows example | Configuration | RTS/CTS |
 | --- | --- | --- | --- | --- |
 | Stock QL SER2 through a USB-to-serial adapter | `/dev/ttyUSB0` | `COM3` | `snl_configUSB0.json` | Enabled |
-| QIMSI Gold USB serial (QL SER2 under SMSQ/E) | `/dev/ttyACM0` | `COM3` | `snl_configACM0.json` | Disabled |
+| QIMSI Gold USB serial | `/dev/ttyACM0` | `COM3` | `snl_configACM0.json` | Disabled |
 
-The port names are examples. On Windows, check Device Manager for the assigned
-COM port. On Linux, including Raspberry Pi OS, use the device assigned to
-your adapter. Windows may require an appropriate driver for the USB device.
+These port names are examples. Use the device assigned to your adapter;
+on Windows, check Device Manager for its COM port. Windows may require a
+USB device driver.
 
 ### Linux and Raspberry Pi OS
 
-For a stock QL with a USB-to-serial adapter:
+Install pyserial using your Python environment or system package manager.
+Choose one configuration:
 
 ```sh
+# Stock QL serial adapter:
 cp snl_configUSB0.json snl_config.json
-```
 
-For QIMSI Gold USB:
-
-```sh
+# Or QIMSI Gold USB:
 cp snl_configACM0.json snl_config.json
 ```
 
@@ -99,154 +87,185 @@ Create the mapped directories and start the daemon:
 
 ```sh
 mkdir -p drive1 drive2 drive3 drive4 drive5 drive6
-python3 snl_serial
+python3 -u snl_serial
 ```
 
 ### Windows (PowerShell)
 
-Install pyserial using your Python installation, for example:
+Install pyserial:
 
 ```powershell
 py -m pip install pyserial
 ```
 
-Copy the configuration for your interface, using one of:
+Choose one configuration:
 
 ```powershell
+# Stock QL serial adapter:
 Copy-Item snl_configUSB0.json snl_config.json
-# Or, for QIMSI Gold USB:
+
+# Or QIMSI Gold USB:
 Copy-Item snl_configACM0.json snl_config.json
 ```
 
-Edit `serial_port` in `snl_config.json` to the assigned port, such as `COM3`.
-Then create the mapped directories and start the daemon:
+Edit `serial_port` to the assigned port, such as `COM3`. Create the mapped
+directories and start the daemon:
 
 ```powershell
 New-Item -ItemType Directory -Force -Path drive1,drive2,drive3,drive4,drive5,drive6
-py snl_serial
+py -u snl_serial
 ```
 
-If your Python installation uses `python` rather than `py`, substitute that
-command. Windows operation, including file operations on open channels such
-as RENAME, still requires platform testing.
+If your installation uses `python` instead of `py`, substitute that command.
 
-### Drive mappings
+### Drive mappings and network shares
 
-Both example configurations map `snl1_` through `snl6_` to `drive1` through
-`drive6`. Add entries and create their directories before using additional
-drives such as `snl7_`.
+The example configurations map `snl1_` through `snl6_` to folders `drive1`
+through `drive6`. Add entries for additional drives, up to `snl8_`. Each
+mapped directory must exist before it is used.
 
-Relative drive paths are resolved from the directory where you start the
-daemon. A leading `~` is not expanded automatically. For absolute Windows
-paths in JSON, use forward slashes (`C:/QL/drive1`) or escape backslashes
-(`C:\\QL\\drive1`).
+Relative paths are resolved from the directory where you start the daemon.
+A leading `~` is not expanded. For absolute Windows paths in JSON, use
+forward slashes (`C:/QL/drive1`) or escape backslashes (`C:\\QL\\drive1`).
 
-For the stock QL's physical serial connection, use 9600 baud, eight data bits,
-no parity, two stop bits, and RTS/CTS hardware flow control. Match the tested
-QL cable wiring, including the handshake lines. QIMSI USB uses RTS/CTS off;
-the example retains the baud and stop-bit settings, but these do not set its
-USB transfer speed. Adjust `serial_port` whenever the host assigns a different
-port name.
+A network share must be accessible through a filesystem path on the host;
+SNL does not interpret `smb://` URLs. For example, if a share is mounted at
+`/mnt/documents`, an entry can map its QL folder directly:
 
-The daemon reserves its host serial device; stop it before switching
-configurations or using the same device for bootstrapping.
+```json
+"8": "/mnt/documents/ql"
+```
 
-Set `channel_stats` to true (the default) for OPEN/CLOSE events and current/peak
-channel counts with V2.33. See [statistics and workload tests](docs/MULTIPLE_CHANNELS.md).
+A drive mapping may also point to a symbolic link to that mounted folder.
+The daemon resolves the link when it loads the mapping. Use a host account
+that can access the share. Files saved there from a Mac or PC are immediately
+available through SNL, and files saved by the QL are available on the share.
 
-Every daemon output line includes the host-local timestamp
-`MM/DD/YYYY HH:MM:SS` (one-second precision).
+### Serial settings and logging
 
-Restart the daemon after config changes.
+For built-in QL serial, use **9600 baud, eight data bits, no parity, two stop
+bits and RTS/CTS hardware flow control**. The cable must carry the handshake
+signals. QIMSI USB uses RTS/CTS off; the example baud and stop-bit settings
+do not determine its USB transfer speed.
+
+The daemon reserves its serial device. Stop it before using that same device
+for bootstrapping or another program. Restart it after configuration changes.
+
+`channel_stats` defaults to true and reports OPEN/CLOSE events plus current
+and peak channel counts. Set `trace` to true for detailed protocol diagnostics.
+Every output line carries the host-local date and time as
+`MM/DD/YYYY HH:MM:SS`. Ctrl-C closes sessions and prints a summary.
 
 ## QL installation and use
 
-Use `bin/snldriver238_bin` (5,296 bytes) with the matching updated daemon.
-The self-contained source assembles with Talent/Quanta 2.02.
-Load it into reserved memory and install it with CALL, not EXEC. See the
-[binary serial bootstrap guide](docs/BINARY_BOOTSTRAP.md) for a direct LBYTES
-transfer using `python3 tools/qltransfer_bin your_binary` on the host
-(use `py` in place of `python3` on Windows). Allocate
-enough memory for the actual binary, with at least 14 bytes for serial LBYTES.
-The SNL entry offset is zero for the raw binaries checked during development.
+Load the supplied binary into reserved memory and install it with CALL:
+
+```basic
+base=RESPR(6000)
+LBYTES win1_snldriver238_bin,base
+CALL base
+```
+
+Substitute the device where you stored the binary. These lines can also go
+in your SuperBASIC BOOT program. With Toolkit II, you can instead use:
+
+```basic
+LRESPR win1_snldriver238_bin
+```
+
+For direct serial delivery of the binary, see the
+[binary bootstrap guide](docs/BINARY_BOOTSTRAP.md). Its host transfer tool is
+`python3 tools/qltransfer_bin your_binary` (`py` on Windows). Reserve space
+for the actual binary length plus at least 14 bytes when using serial LBYTES.
 
 Reset before replacing an installed driver; SNL owns SER2 until reset.
-After installation, start the daemon before accessing files. A missed daemon
-startup is recoverable: start it and retry the failed command without resetting.
+Start the daemon before accessing files. If it was not started, start it and
+retry the failed command without reinstalling SNL.
 
 Examples:
 
-```text
+```basic
 DIR snl3_
+DIR snl6_s
 LOAD snl3_program_bas
 SAVE snl3_newprogram_bas
+LBYTES snl1_data_bin,base
+COPY snl1_program_bas TO snl2_program_bas
 DELETE snl3_newprogram_bas
 EXEC snl1_monitor
 ```
 
-Filename lookup ignores case while preserving the stored spelling. Dots are
-literal filename characters; SNL does not translate dots to underscores.
-Use quoted filenames where needed by SuperBASIC syntax.
+Directories use QDOS underscore notation, for example `snl1_games_`.
+Toolkit II provides commands such as MAKE_DIR and directory navigation on
+stock QDOS. See [directory usage](docs/LEVEL2_DIRECTORIES.md).
 
-## Files and backups
+Dots are literal filename characters; SNL does not translate dots to
+underscores. Quote filenames where required by SuperBASIC syntax.
 
-New SNL files contain payload bytes; their QDOS metadata is stored in a hidden
-`.snl_headers` directory. Preserve that directory with host-side backups and
-move/rename the corresponding metadata when moving/renaming files manually.
-The daemon also understands 30- and 44-byte emulator wrappers, allowing files
-extracted by QL Unzip in sQLux to be used by the physical QL.
+## Files, headers and backups
 
-Use normal QDOS/Toolkit II COPY to preserve headers when transferring a file
-between Microdrive and SNL. COPY_N omits headers. Individual file copying has
-been used on hardware. V2.33 multi-channel source addresses the restriction
-that previously prevented WCOPY from holding a directory and file open
-simultaneously. SNL-to-SNL COPY and WCOPY passed hardware testing.
+SNL stores ordinary payload files on the host. Their QDOS metadata is kept
+in a hidden `.snl_headers` directory alongside them. Include that directory
+in backups, and move or rename the corresponding metadata when manually
+moving or renaming files on the host.
 
-## Current limits
+The daemon also understands 30- and 44-byte emulator wrappers, allowing
+files extracted by QL Unzip in sQLux to be used by the physical QL.
 
-- Multiple channels and SNL-to-SNL copying are supported. Tested workloads
-  peaked at three channels for WCOPY and two for Unzip/assembly with includes.
-- Real subdirectories are supported; see [directory behavior and hardware
-  results](docs/LEVEL2_DIRECTORIES.md).
-- No format. QDOS paths remain limited to 36 characters after the device
-  prefix. V2.30 adds rename and truncate;
-  all seven hardware test steps passed under SMSQ/E and on stock QDOS with
-  Toolkit II. See [V2.30 results](docs/RENAME_TRUNCATE.md).
-  V2.29 metadata hardware results are recorded
-  in [the test notes](docs/METADATA_TEST.md).
-- Stock DIR space counts are capped at 32767 sectors for display; this is not
-  a storage quota.
-- Readiness handles missed daemon startup, not arbitrary interrupted binary
-  transfers or automatic replay of writes/deletes.
-- Physical hardware is tested. Running the driver inside an emulator is
-  unverified and requires a usable serial mapping plus ROM compatibility.
+Use normal QDOS/Toolkit II COPY or WCOPY to preserve headers when moving
+files between QL devices and SNL. COPY_N omits headers. QL Zip/Unzip can
+preserve executable metadata when transferring archives through other
+operating systems.
 
-## Verification and documentation
+## Current limitations
 
-From the repository root:
+- FORMAT is not implemented; storage is managed by the host filesystem.
+- QDOS paths are limited to 36 characters after the device prefix.
+- Stock DIR space counts are capped at 32,767 sectors; extended counts are
+  capped at 4,294,967,295 sectors. These are reporting limits, not storage quotas.
+- A daemon or connection failure during a transfer reports an error. There is
+  no automatic replay or recovery of an interrupted binary exchange.
+- Application memory requirements still apply. Unzip and assembly with
+  include files exhausted memory in some stock 128K QL tests.
+- Running SNL inside an emulator requires a suitable serial mapping and
+  compatible ROM/driver behavior; current release validation targets physical
+  hardware.
+
+## Source, tests and documentation
+
+```text
+bin/              Release binary
+SNLdriver_asm      Self-contained QL assembly source
+snl_serial         Python serial filesystem daemon
+snl_config.json    Serial settings and drive mappings
+tools/             Host transfer and verification utilities
+tests/             Automated regression tests
+  ql/              BASIC programs for hardware tests
+  fixtures/        Sample test input
+docs/              Usage, protocol, hardware results and development notes
+reference/         Original sources and superseded experiments
+```
+
+The source assembles with Talent/Quanta Assembler 2.02. Constants are included
+in `SNLdriver_asm`; no separate include file is needed. SYM output is disabled.
+Retained reference sources are not build inputs.
+
+Run the automated suite from the repository root:
 
 ```sh
 python3 -B -m unittest discover -s tests -t . -q
 ```
 
-On Windows, substitute `py` for `python3`. Some tests exercise filesystem
-behaviors such as symlinks and may need platform-specific permissions.
+On Windows, substitute `py` for `python3`. Some filesystem tests, such as
+symlink tests, may require platform-specific permissions. The tests exercise
+the daemon and an interpreter of the assembly source, including transport
+errors, register/stack handling and alignment. They complement Talent
+assembly and hardware testing.
 
-The automated tests cover the daemon and an interpreter of the actual assembly source,
-including transport errors, register/stack handling and alignment. The five
-profiling-specific tests are retained with V2.24 in the diagnostic checkpoint.
-They do not replace Talent assembly or physical serial testing. V2.33 has been
-assembled and tested on the stock 128K QL and QIMSI Gold USB under SMSQ/E;
-see the [multi-channel results](docs/MULTIPLE_CHANNELS.md) for platform limits.
-Hardware coverage includes BASIC load/save, existing-file handling, binary integrity and memory guards,
-directories and prefix filtering, empty directories, missing files, executable
-loading and assembling the driver through SNL. Stock QL testing also confirmed
-recovery after starting a missing daemon. Minerva is unverified for V2.33.
+The [documentation index](docs/README.md) links to usage guides, test results,
+protocol details and historical development notes. Source attribution and
+redistribution notices remain in the assembly source; original reference
+material is under `reference/`.
 
-Start with the [documentation index](docs/README.md) for hardware tests,
-bootstrap instructions, protocol details and historical development notes.
-Original source attribution and redistribution notices remain in the assembly
-source; original reference material is under `reference/`.
-
-The local drive folders, Python caches and optional `build/`/`dist/` staging
-folders are ignored by Git. No local drive contents are part of this project.
+Local drive contents, Python caches and optional `build/`/`dist/` staging
+folders are ignored by Git.
